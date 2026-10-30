@@ -1,0 +1,157 @@
+{
+  "version": 2,
+  "duration": 0.8,
+  "dt": 0.0001,
+  "components": [
+    {
+      "id": "e1yma",
+      "type": "A",
+      "x": 258,
+      "y": 486,
+      "rot": 0,
+      "params": {}
+    },
+    {
+      "id": "e1ymb",
+      "type": "R",
+      "x": 402,
+      "y": 162,
+      "rot": 0,
+      "params": {
+        "r": 1000
+      }
+    },
+    {
+      "id": "e1ymc",
+      "type": "C",
+      "x": 606,
+      "y": 222,
+      "rot": 0,
+      "params": {
+        "c": 0.0001
+      }
+    },
+    {
+      "id": "e1yme",
+      "type": "GND",
+      "x": 6,
+      "y": 330,
+      "rot": 180,
+      "params": {}
+    },
+    {
+      "id": "e1ymt",
+      "type": "GND",
+      "x": 822,
+      "y": 330,
+      "rot": 180,
+      "params": {}
+    },
+    {
+      "id": "e1ymx",
+      "type": "VS",
+      "x": 90,
+      "y": 282,
+      "rot": 0,
+      "params": {
+        "amp": 5,
+        "freq": 50,
+        "phase": 0
+      }
+    }
+  ],
+  "nets": [
+    {
+      "id": "n1ymg",
+      "ports": [
+        "e1yma:0",
+        "e1ymx:1"
+      ],
+      "segs": [
+        {
+          "id": "w1ymy",
+          "a": {
+            "port": "e1ymx:1"
+          },
+          "b": {
+            "port": "e1yma:0"
+          },
+          "via": []
+        }
+      ],
+      "junctions": []
+    },
+    {
+      "id": "n1ymi",
+      "ports": [
+        "e1yma:1",
+        "e1ymb:0"
+      ],
+      "segs": [
+        {
+          "id": "w1ymj",
+          "a": {
+            "port": "e1yma:1"
+          },
+          "b": {
+            "port": "e1ymb:0"
+          },
+          "via": []
+        }
+      ],
+      "junctions": []
+    },
+    {
+      "id": "n1ymo",
+      "ports": [
+        "e1ymc:1",
+        "e1yme:0",
+        "e1ymt:0",
+        "e1ymx:0"
+      ],
+      "segs": [
+        {
+          "id": "w1ymu",
+          "a": {
+            "port": "e1ymc:1"
+          },
+          "b": {
+            "port": "e1ymt:0"
+          },
+          "via": []
+        },
+        {
+          "id": "w1ymz",
+          "a": {
+            "port": "e1ymx:0"
+          },
+          "b": {
+            "port": "e1yme:0"
+          },
+          "via": []
+        }
+      ],
+      "junctions": []
+    },
+    {
+      "id": "n1yn0",
+      "ports": [
+        "e1ymb:1",
+        "e1ymc:0"
+      ],
+      "segs": [
+        {
+          "id": "w1yn1",
+          "a": {
+            "port": "e1ymb:1"
+          },
+          "b": {
+            "port": "e1ymc:0"
+          },
+          "via": []
+        }
+      ],
+      "junctions": []
+    }
+  ]
+}

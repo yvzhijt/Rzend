@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rzend</title>
+  <link rel="stylesheet" href="/src/styles/main.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 顶部工具栏 -->
+    <div id="ribbon">
+      <div class="ribbon-section">
+        <button class="ribbon-btn" id="ribbon-new-file" title="新建 .yt / .pyt 文件">
+          <span class="ribbon-btn-icon">📄</span><span class="ribbon-btn-text">新建</span>
+        </button>
+        <button class="ribbon-btn" id="ribbon-open-folder" title="打开文件夹">
+          <span class="ribbon-btn-icon">📂</span><span class="ribbon-btn-text">打开</span>
+        </button>
+        <button class="ribbon-btn" id="ribbon-save" title="保存 (Ctrl+S)">
+          <span class="ribbon-btn-icon">💾</span><span class="ribbon-btn-text">保存</span>
+        </button>
+      </div>
+      <div class="ribbon-divider"></div>
+      <div class="ribbon-section">
+        <button class="ribbon-btn accent" id="ribbon-run" title="运行当前文件 (F5)">
+          <span class="ribbon-btn-icon">▶</span><span class="ribbon-btn-text">运行</span>
+        </button>
+      </div>
+      <div class="ribbon-divider"></div>
+      <div class="ribbon-section">
+        <button class="ribbon-btn" id="ribbon-toggle-folder" title="切换文件夹面板">
+          <span class="ribbon-btn-icon">📁</span><span class="ribbon-btn-text">文件夹</span>
+        </button>
+        <button class="ribbon-btn" id="ribbon-toggle-workspace" title="切换工作区面板">
+          <span class="ribbon-btn-icon">📦</span><span class="ribbon-btn-text">工作区</span>
+        </button>
+      </div>
+      <div class="ribbon-divider"></div>
+      <div class="ribbon-section">
+        <button class="ribbon-btn" id="ribbon-circuit" title="打开仿真画布">
+          <span class="ribbon-btn-icon">⚡</span><span class="ribbon-btn-text">仿真</span>
+        </button>
+      </div>
+      <div class="ribbon-right">
+        <span class="ribbon-title">Rzend</span>
+      </div>
+    </div>
+
+    <!-- 主工作区 -->
+    <div id="main-area">
+      <!-- 左侧：当前文件夹 -->
+      <div id="folder-panel">
+        <div class="panel-header">
+          <span class="panel-title">当前文件夹</span>
+          <div class="panel-actions">
+            <button class="panel-icon-btn" id="btn-refresh" title="刷新">↻</button>
+            <button class="panel-icon-btn" id="btn-folder-up" title="上级目录">↑</button>
+          </div>
+        </div>
+        <div id="folder-path-bar"><span id="current-folder-path"></span></div>
+        <div id="file-tree" class="file-tree"></div>
+      </div>
+
+      <div class="splitter" id="split-left"></div>
+
+      <!-- 中间：编辑器（可折叠）+ 命令行 -->
+      <div id="center-area">
+        <!-- 简易编辑器（默认隐藏） -->
+        <div id="editor-panel" class="hidden">
+          <div id="editor-toolbar">
+            <span id="editor-filename"></span>
+            <span id="editor-modified" class="hidden">● 已修改</span>
+            <div class="editor-toolbar-actions">
+              <button id="btn-run-file" class="toolbar-btn" title="运行 (F5)">▶ 运行</button>
+              <button id="btn-save-file" class="toolbar-btn" title="保存 (Ctrl+S)">💾 保存</button>
+              <button id="btn-close-file" class="toolbar-btn" title="关闭">✕</button>
+            </div>
+          </div>
+          <div class="editor-container">
+            <div id="line-numbers"></div>
+            <textarea id="code-textarea" spellcheck="false"></textarea>
+          </div>
+          <div class="splitter-v" id="split-editor"></div>
+        </div>
+
+        <!-- 命令行窗口（主体） -->
+        <div id="command-window">
+          <div class="cmd-header">
+            <span class="cmd-title">命令行窗口</span>
+            <div class="cmd-actions">
+              <button class="panel-icon-btn" id="btn-clear-cmd" title="清空命令行 (clc)">🗑</button>
+            </div>
+          </div>
+          <div id="cmd-scroll">
+            <div id="cmd-output"></div>
+            <div id="cmd-input-line">
+              <span class="cmd-prompt" id="cmd-prompt">&gt;&gt;</span>
+              <input type="text" id="cmd-input" autocomplete="off" spellcheck="false" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="splitter" id="split-right"></div>
+
+      <!-- 右侧：工作区 -->
+      <div id="workspace-panel">
+        <div class="panel-header">
+          <span class="panel-title">工作区</span>
+          <div class="panel-actions">
+            <button class="panel-icon-btn" id="btn-clear-workspace" title="清空工作区 (clear)">🗑</button>
+          </div>
+        </div>
+        <div id="workspace-content">
+          <div class="workspace-section-header">
+            名称<span class="ws-header-value">值</span><span class="ws-header-type">类型</span><span class="ws-header-size">大小</span>
+          </div>
+          <div id="workspace-vars"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 电路仿真画布 -->
+    <div id="circuit-view" class="hidden">
+      <div id="circ-toolbar">
+        <span class="sim-title">电路仿真</span>
+        <button class="toolbar-btn accent" id="circ-run">▶ 运行</button>
+        <button class="toolbar-btn" id="circ-save">💾 保存</button>
+        <button class="toolbar-btn" id="circ-save-as">💾 另存为</button>
+        <button class="toolbar-btn" id="circ-open">📂 打开</button>
+        <button class="toolbar-btn" id="circ-clear">清空</button>
+        <span class="sim-sep"></span>
+        <label class="sim-field">时长 <input id="circ-duration" type="number" value="0.005" step="0.001" min="0.000001"></label>
+        <label class="sim-field">步长 <input id="circ-dt" type="number" value="0.000002" step="0.0000001" min="0.000000001"></label>
+        <span class="sim-status" id="circ-status">就绪</span>
+        <button class="toolbar-btn sim-close" id="circ-close">✕ 关闭</button>
+      </div>
+      <div id="circ-body">
+        <div id="circ-palette">
+          <input id="circ-search" class="circ-search" type="text" placeholder="搜索元件" autocomplete="off">
+          <div id="circ-palette-list"></div>
+        </div>
+        <div id="circ-canvas-wrap">
+          <svg id="circ-canvas">
+            <defs>
+              <pattern id="circ-grid-pattern" width="12" height="12" patternUnits="userSpaceOnUse">
+                <circle cx="6" cy="6" r="1" fill="#d2d9e1" />
+              </pattern>
+            </defs>
+            <rect x="0" y="0" width="100%" height="100%" fill="url(#circ-grid-pattern)" />
+            <g id="circ-wires-layer"></g>
+            <g id="circ-temp-layer"></g>
+            <g id="circ-elements-layer"></g>
+          </svg>
+          <div id="circ-open-list" class="hidden"></div>
+          <div id="circ-empty" class="circ-empty hidden">画布为空 · 在左侧搜索元件后点击添加</div>
+        </div>
+        <div id="circ-props">
+          <div class="panel-header"><span class="panel-title">元件参数</span></div>
+          <div id="circ-props-body"><div class="placeholder-content">选中一个元件</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="scope-window" class="hidden">
+      <div id="scope-head">
+        <span class="scope-title" id="scope-title">示波器</span>
+        <span id="scope-sub"></span>
+        <button id="scope-reset" title="复位视图">复位</button>
+        <button id="scope-close" title="关闭">✕</button>
+      </div>
+      <canvas id="scope-canvas"></canvas>
+      <div id="scope-legend"></div>
+    </div>
+
+    <!-- 新建文件对话框 -->
+    <div id="name-modal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div class="modal-title" id="name-modal-title">新建文件</div>
+        <div class="modal-body">
+          <label class="modal-field">
+            <span>文件名</span>
+            <input id="name-input" type="text" autocomplete="off" spellcheck="false" placeholder="例如 demo">
+          </label>
+          <label class="modal-field">
+            <span>类型</span>
+            <select id="name-type">
+              <option value="yt">.yt — Rzend 计算脚本</option>
+              <option value="pyt">.pyt — MicroPython 脚本</option>
+            </select>
+          </label>
+          <div id="name-error" class="modal-error"></div>
+        </div>
+        <div class="modal-actions">
+          <button id="name-cancel" class="toolbar-btn">取消</button>
+          <button id="name-ok" class="toolbar-btn primary">创建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 脚本输入（input()）对话框 -->
+    <div id="stdin-modal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div class="modal-title">脚本需要输入</div>
+        <div class="modal-body">
+          <div id="stdin-hint" class="modal-hint">该脚本调用了 input()，请每行填写一个输入值，运行时按顺序提供给脚本。</div>
+          <textarea id="stdin-input" rows="5" spellcheck="false" placeholder="第一行的输入值&#10;第二行的输入值"></textarea>
+          <div id="stdin-error" class="modal-error"></div>
+        </div>
+        <div class="modal-actions">
+          <button id="stdin-cancel" class="toolbar-btn">取消</button>
+          <button id="stdin-ok" class="toolbar-btn primary">运行</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 状态栏 -->
+    <div id="statusbar">
+      <div class="statusbar-left">
+        <span id="status-indicator" class="status-item">就绪</span>
+      </div>
+      <div class="statusbar-right">
+        <span id="status-folder" class="status-item"></span>
+        <span class="status-separator">|</span>
+        <span class="status-item">Rzend v0.2.0</span>
+      </div>
+    </div>
+
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
