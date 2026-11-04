@@ -402,34 +402,44 @@ export function simulate(model) {
 
   const G_MIN = 1e-12;
 
+  // 矩阵、右端项与 stamp 闭包都在循环外创建，循环内只做复位，
+  // 避免几十万步 × n² 规模的重复分配触发 GC 卡顿
+  const A = zeros(size);
+  const z = zeros(size, true);
+  const stampG = (i, j, g) => {
+    if (i > 0) A[i - 1][i - 1] += g;
+    if (j > 0) A[j - 1][j - 1] += g;
+    if (i > 0 && j > 0) {
+      A[i - 1][j - 1] -= g;
+      A[j - 1][i - 1] -= g;
+    }
+  };
+  const stampI = (i, j, cur) => {
+    if (i > 0) z[i - 1] -= cur;
+    if (j > 0) z[j - 1] += cur;
+  };
+  const stampV = (p, q, value, row) => {
+    if (p > 0) {
+      A[row][p - 1] += 1;
+      A[p - 1][row] += 1;
+    }
+    if (q > 0) {
+      A[row][q - 1] -= 1;
+      A[q - 1][row] -= 1;
+    }
+    z[row] += value;
+  };
+  const resetLinear = () => {
+    for (let i = 0; i < size; i++) {
+      const r = A[i];
+      for (let j = 0; j < size; j++) r[j] = 0;
+      z[i] = 0;
+    }
+  };
+
   for (let step = 0; step <= steps; step++) {
     const t = step * dt;
-    const A = zeros(size);
-    const z = zeros(size, true);
-
-    const stampG = (i, j, g) => {
-      if (i > 0) A[i - 1][i - 1] += g;
-      if (j > 0) A[j - 1][j - 1] += g;
-      if (i > 0 && j > 0) {
-        A[i - 1][j - 1] -= g;
-        A[j - 1][i - 1] -= g;
-      }
-    };
-    const stampI = (i, j, cur) => {
-      if (i > 0) z[i - 1] -= cur;
-      if (j > 0) z[j - 1] += cur;
-    };
-    const stampV = (p, q, value, row) => {
-      if (p > 0) {
-        A[row][p - 1] += 1;
-        A[p - 1][row] += 1;
-      }
-      if (q > 0) {
-        A[row][q - 1] -= 1;
-        A[q - 1][row] -= 1;
-      }
-      z[row] += value;
-    };
+    resetLinear();
 
     // 每个节点到地加极小电导，避免悬空节点导致矩阵奇异
     for (let i = 1; i < nodeCount; i++) A[i - 1][i - 1] += G_MIN;

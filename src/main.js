@@ -6,6 +6,9 @@ const state = {
   cwd: '',
   entries: [],
   expanded: new Set(),
+  treeLoading: new Set(),
+  treeErrors: new Map(),
+  treeError: '',
   activeFile: null,
   content: '',
   original: '',
@@ -27,7 +30,6 @@ async function init() {
   bindEditor();
   bindCommandLine();
   bindSplitters();
-  bindNewFileModal();
   initCircuit({ getCwd: () => state.cwd, refresh: refreshTree });
 
   document.addEventListener('rzend:plot', (e) => showPlot(e.detail));
@@ -42,7 +44,6 @@ function bindRibbon() {
   $('#ribbon-open-folder')?.addEventListener('click', openFolderDialog);
   $('#ribbon-save')?.addEventListener('click', saveFile);
   $('#ribbon-run')?.addEventListener('click', runActiveFile);
-  $('#ribbon-new-file')?.addEventListener('click', openNewFileModal);
   $('#ribbon-toggle-folder')?.addEventListener('click', () => togglePanel('#folder-panel', '#split-left'));
   $('#ribbon-toggle-workspace')?.addEventListener('click', () => togglePanel('#workspace-panel', '#split-right'));
   $('#ribbon-circuit')?.addEventListener('click', openCircuit);
@@ -89,9 +90,12 @@ function bindSplitters() {
 async function refreshTree() {
   try {
     state.entries = await invoke('shell_ls');
+    state.treeError = '';
+    state.treeErrors.clear();
   } catch (e) {
     state.entries = [];
-    console.error('读取目录失败', e);
+    state.treeError = String(e);
+    print(`读取目录失败: ${e}\n`, 'cmd-err');
   }
   renderTree();
   $('#current-folder-path').textContent = state.cwd || '—';
@@ -101,6 +105,10 @@ async function refreshTree() {
 function renderTree() {
   const tree = $('#file-tree');
   tree.innerHTML = '';
+  if (state.treeError) {
+    tree.innerHTML = `<div class="placeholder-content">${esc(state.treeError)}</div>`;
+    return;
+  }
   if (!state.entries.length) {
     tree.innerHTML = '<div class="placeholder-content">空文件夹</div>';
     return;
@@ -131,8 +139,12 @@ function renderNode(container, entry, depth) {
 
   row.addEventListener('click', () => {
     if (entry.is_dir) {
-      if (state.expanded.has(entry.path)) state.expanded.delete(entry.path);
-      else state.expanded.add(entry.path);
+      if (state.expanded.has(entry.path)) {
+        state.expanded.delete(entry.path);
+      } else {
+        state.treeErrors.delete(entry.path);
+        state.expanded.add(entry.path);
+      }
       renderTree();
     } else {
       openFile(entry.path);
@@ -141,9 +153,58 @@ function renderNode(container, entry, depth) {
 
   container.appendChild(row);
 
-  if (entry.is_dir && state.expanded.has(entry.path) && entry.children) {
-    entry.children.forEach((c) => renderNode(container, c, depth + 1));
+  if (entry.is_dir && state.expanded.has(entry.path)) {
+    if (entry.children === null) {
+      if (state.treeLoading.has(entry.path)) {
+        renderTreeMessage(container, '正在读取…', depth + 1);
+      } else if (state.treeErrors.has(entry.path)) {
+        renderTreeMessage(container, '读取失败，收起后重新展开可重试', depth + 1);
+      } else {
+        queueMicrotask(() => loadTreeDirectory(entry));
+      }
+    } else if (!entry.children.length) {
+      renderTreeMessage(container, '空文件夹', depth + 1);
+    } else {
+      entry.children.forEach((child) => renderNode(container, child, depth + 1));
+    }
   }
+}
+
+function renderTreeMessage(container, text, depth) {
+  const row = document.createElement('div');
+  row.className = 'tree-message';
+  row.style.paddingLeft = `${depth * 14 + 8}px`;
+  row.textContent = text;
+  container.appendChild(row);
+}
+
+async function loadTreeDirectory(entry) {
+  if (state.treeLoading.has(entry.path) || !state.expanded.has(entry.path)) return;
+  state.treeLoading.add(entry.path);
+  renderTree();
+  try {
+    const children = await invoke('scan_directory', { path: entry.path });
+    const currentEntry = findTreeEntry(state.entries, entry.path);
+    if (currentEntry) {
+      currentEntry.children = children;
+      state.treeErrors.delete(entry.path);
+    }
+  } catch (e) {
+    state.treeErrors.set(entry.path, String(e));
+    print(`读取文件夹失败: ${e}\n`, 'cmd-err');
+  } finally {
+    state.treeLoading.delete(entry.path);
+    renderTree();
+  }
+}
+
+function findTreeEntry(entries, path) {
+  for (const entry of entries) {
+    if (entry.path === path) return entry;
+    const found = entry.children && findTreeEntry(entry.children, path);
+    if (found) return found;
+  }
+  return null;
 }
 
 function fileIcon(name) {
@@ -229,11 +290,15 @@ function closeEditor() {
   focusInput();
 }
 
+let lastLineCount = -1;
+
 function updateLineNumbers() {
   const ta = $('#code-textarea');
   const ln = $('#line-numbers');
   if (!ta || !ln) return;
   const n = ta.value.split('\n').length;
+  if (n === lastLineCount) return; // 行数不变时跳过重建，避免每次按键全量刷新
+  lastLineCount = n;
   ln.innerHTML = Array.from({ length: n }, (_, i) => `<div>${i + 1}</div>`).join('');
 }
 
@@ -252,110 +317,31 @@ async function saveFile() {
   }
 }
 
-/* ---------------- 新建文件 ---------------- */
+/* ---------------- 命令行新建文件 ---------------- */
 
-const ILLEGAL_CHARS = /[<>:"/\\|?*\u0000-\u001f]/;
-const RESERVED_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
-const FILE_TYPES = { yt: '.yt', pyt: '.pyt' };
+const ILLEGAL_FILE_NAME_CHARS = /[<>:"/\\|?*\u0000-\u001f]/;
+const RESERVED_FILE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 
-// 校验并规范化文件名：扩展名以用户输入的为准，否则用所选类型
-function validateFileName(raw, type) {
+function validateNewFileName(raw) {
   let name = String(raw || '').trim();
-  if (!name) return { error: '请输入文件名' };
-  const m = /\.(yt|pyt)$/i.exec(name);
-  const ext = m ? m[1].toLowerCase() : (FILE_TYPES[type] ? type : 'yt');
-  if (m) name = name.slice(0, -m[0].length);
-  if (!name) return { error: '请输入文件名（不含扩展名）' };
-  if (name.length > 100) return { error: '文件名过长（最多 100 个字符）' };
-  if (ILLEGAL_CHARS.test(name)) return { error: '文件名不能包含 < > : " / \\ | ? * 等字符' };
-  if (/[. ]$/.test(name)) return { error: '文件名不能以空格或句点结尾' };
-  if (RESERVED_NAMES.test(name)) return { error: `「${name}」是系统保留名，请换一个` };
-  return { name, ext };
-}
-
-function openNewFileModal() {
-  const modal = $('#name-modal');
-  if (!modal) return;
-  const exists = new Set(state.entries.map((e) => e.name.toLowerCase()));
-  let base = 'untitled';
-  let i = 2;
-  while (exists.has(`${base}.yt`) || exists.has(`${base}.pyt`)) base = `untitled${i++}`;
-  $('#name-modal-title').textContent = '新建文件';
-  $('#name-type').value = 'yt';
-  $('#name-error').textContent = '';
-  const input = $('#name-input');
-  input.value = base;
-  modal.classList.remove('hidden');
-  input.focus();
-  input.select();
-}
-
-function closeNewFileModal() {
-  $('#name-modal')?.classList.add('hidden');
-  focusInput();
-}
-
-async function confirmNewFile() {
-  const typeEl = $('#name-type');
-  const input = $('#name-input');
-  const errBox = $('#name-error');
-  const type = typeEl?.value === 'pyt' ? 'pyt' : 'yt';
-  const v = validateFileName(input?.value, type);
-  if (v.error) {
-    errBox.textContent = v.error;
-    input?.focus();
-    return;
+  if ((name.startsWith('"') && name.endsWith('"')) || (name.startsWith("'") && name.endsWith("'"))) {
+    name = name.slice(1, -1);
   }
-  const file = `${v.name}.${v.ext}`;
-  const cwd = state.cwd.replace(/\\/g, '/');
-  const path = `${cwd}/${file}`;
-  const clash = state.entries.some((e) => e.name.toLowerCase() === file.toLowerCase());
-  if (clash || (await fileExists(path))) {
-    errBox.textContent = `当前文件夹已存在 ${file}`;
-    input?.focus();
-    return;
-  }
-  try {
-    await invoke('write_file_content', { path, content: '' });
-    closeNewFileModal();
-    await refreshTree();
-    await openFile(path);
-    print(`已新建: ${file}\n`, 'cmd-info');
-  } catch (e) {
-    errBox.textContent = `创建失败: ${e}`;
-  }
+  if (!name) throw new Error('用法: ni <文件名>，例如 ni a.py');
+  if (name === '.' || name === '..') throw new Error('不能用 . 或 .. 作为文件名');
+  if (name.length > 255) throw new Error('文件名过长（最多 255 个字符）');
+  if (ILLEGAL_FILE_NAME_CHARS.test(name)) throw new Error('文件名不能包含路径分隔符或 Windows 不允许的字符');
+  if (/[. ]$/.test(name)) throw new Error('文件名不能以空格或句点结尾');
+  if (RESERVED_FILE_NAME.test(name)) throw new Error(`「${name}」是系统保留名，请换一个`);
+  return name;
 }
 
-function bindNewFileModal() {
-  const modal = $('#name-modal');
-  if (!modal) return;
-  $('#name-ok')?.addEventListener('click', confirmNewFile);
-  $('#name-cancel')?.addEventListener('click', closeNewFileModal);
-  modal.addEventListener('pointerdown', (e) => {
-    if (e.target === modal) closeNewFileModal();
-  });
-  modal.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      closeNewFileModal();
-    } else if (e.key === 'Enter' && e.target?.id !== 'name-cancel') {
-      e.preventDefault();
-      confirmNewFile();
-    }
-    e.stopPropagation();
-  });
-  $('#name-input')?.addEventListener('input', () => {
-    $('#name-error').textContent = '';
-  });
-}
-
-async function fileExists(path) {
-  try {
-    await invoke('read_file_content', { path });
-    return true;
-  } catch {
-    return false;
-  }
+async function createFileFromCommand(rawName) {
+  const name = validateNewFileName(rawName);
+  const path = await invoke('create_file', { name });
+  await refreshTree();
+  await openFile(path);
+  print(`已新建: ${name}\n`, 'cmd-info');
 }
 
 /* ---------------- 命令行 ---------------- */
@@ -481,6 +467,9 @@ async function execLine(raw) {
       if (!arg) return print(`${state.cwd}\n`, 'cmd-result');
       return doCd(arg);
     }
+    if (cmd === 'ni') {
+      return await createFileFromCommand(arg);
+    }
     if (cmd === 'mkdir' || cmd === 'md') {
       if (!arg) return print('用法: mkdir <文件夹名>\n', 'cmd-err');
       const msg = await invoke('shell_mkdir', { name: arg });
@@ -547,6 +536,7 @@ async function execLine(raw) {
 function printHelp() {
   print(
     '── shell ─────────────────────────────────\n' +
+    '  ni <文件名>    在当前目录新建文件，例如 ni a.py / ni w.java\n' +
     '  cd <目录>      切换目录（文件树同步）\n' +
     '  ls / dir       列出当前目录\n' +
     '  mkdir <名称>   新建文件夹\n' +
@@ -555,7 +545,7 @@ function printHelp() {
     '  cls / clc      清屏\n' +
     '  py             进入 MicroPython 交互模式 (exit 退出)\n' +
     '  py <文件.pyt>  运行 Python 文件\n' +
-    '  run [文件.yt]  运行 .yt 文件（默认当前文件）\n' +
+    '  run [文件.yt]  仅运行 .yt 文件（默认当前文件）\n' +
     '  circuit [文件.ckt] 打开电路仿真画布\n' +
     '  clear          清空工作区变量\n' +
     '  who            列出工作区变量\n' +
@@ -565,8 +555,13 @@ function printHelp() {
     '  a*b  a+b  a-b             矩阵运算（结果存入 ans）\n' +
     "  a'                        转置\n" +
     '  H(a)  行列式    N(a) 逆矩阵    R(a) 秩\n' +
+    '  GS(a) 行最简阶梯形矩阵    T(a) 特征值与特征向量（可含复数）\n' +
     '  y->x  声明函数，y=sin(x)-x 定义映射\n' +
-    '  plot(y) / plot(y,f)       绘制函数图像\n' +
+    '  plot(y) / plot(y,f)       绘图；plot(y;0,100) 自定义 x 范围\n' +
+    '  seek(y=0) / seek(y=0,-5,5) 求多项式根（最高 10 次）；超越方程搜索实根\n' +
+    '  jf(y,0,1)                 数值积分；asin/acos/atan 与 asinh/acosh/atanh\n' +
+    '  i/j 未定义时为虚数单位；二、三次多项式用公式，高次多项式数值求根\n' +
+    '  复值函数绘图显示实部和虚部；三角函数使用弧度\n' +
     '  e=2.71828   pi=3.14159265 只读常量\n\n',
     'cmd-info'
   );
@@ -588,7 +583,11 @@ async function doCd(path, silent = false) {
 
 async function runActiveFile() {
   if (!state.activeFile) {
-    print('没有可运行的文件，请先在文件树中选择 .yt 或 .pyt\n', 'cmd-err');
+    print('没有可运行的文件，请先在文件树中选择 .yt 文件\n', 'cmd-err');
+    return;
+  }
+  if (!/\.yt$/i.test(state.activeFile)) {
+    print('运行按钮仅执行 .yt 文件；.pyt 等文件可使用对应命令运行\n', 'cmd-err');
     return;
   }
   if (state.content !== state.original) await saveFile();
@@ -596,7 +595,10 @@ async function runActiveFile() {
 }
 
 async function runFile(path) {
-  if (/\.pyt$/i.test(path) || /\.py$/i.test(path)) return runPytFile(path);
+  if (!/\.yt$/i.test(path)) {
+    print('run 只支持 .yt 文件；运行 Python 文件请使用 py <文件.pyt>\n', 'cmd-err');
+    return;
+  }
   try {
     const result = await invoke('run_yt_file', { path });
     renderResult(result);
@@ -770,7 +772,12 @@ document.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (k === 's') { e.preventDefault(); saveFile(); }
   else if (k === 'o') { e.preventDefault(); openFolderDialog(); }
-  else if (k === 'n') { e.preventDefault(); openNewFileModal(); }
+  else if (k === 'n') {
+    e.preventDefault();
+    const input = $('#cmd-input');
+    input.value = 'ni ';
+    focusInput();
+  }
   else if (k === 'w') { e.preventDefault(); closeEditor(); }
 });
 

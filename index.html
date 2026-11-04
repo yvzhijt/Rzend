@@ -11,9 +11,6 @@
     <!-- 顶部工具栏 -->
     <div id="ribbon">
       <div class="ribbon-section">
-        <button class="ribbon-btn" id="ribbon-new-file" title="新建 .yt / .pyt 文件">
-          <span class="ribbon-btn-icon">📄</span><span class="ribbon-btn-text">新建</span>
-        </button>
         <button class="ribbon-btn" id="ribbon-open-folder" title="打开文件夹">
           <span class="ribbon-btn-icon">📂</span><span class="ribbon-btn-text">打开</span>
         </button>
@@ -23,7 +20,7 @@
       </div>
       <div class="ribbon-divider"></div>
       <div class="ribbon-section">
-        <button class="ribbon-btn accent" id="ribbon-run" title="运行当前文件 (F5)">
+        <button class="ribbon-btn accent" id="ribbon-run" title="仅运行当前 .yt 文件 (F5)">
           <span class="ribbon-btn-icon">▶</span><span class="ribbon-btn-text">运行</span>
         </button>
       </div>
@@ -72,7 +69,7 @@
             <span id="editor-filename"></span>
             <span id="editor-modified" class="hidden">● 已修改</span>
             <div class="editor-toolbar-actions">
-              <button id="btn-run-file" class="toolbar-btn" title="运行 (F5)">▶ 运行</button>
+              <button id="btn-run-file" class="toolbar-btn" title="仅运行 .yt 文件 (F5)">▶ 运行</button>
               <button id="btn-save-file" class="toolbar-btn" title="保存 (Ctrl+S)">💾 保存</button>
               <button id="btn-close-file" class="toolbar-btn" title="关闭">✕</button>
             </div>
@@ -172,31 +169,6 @@
       </div>
       <canvas id="scope-canvas"></canvas>
       <div id="scope-legend"></div>
-    </div>
-
-    <!-- 新建文件对话框 -->
-    <div id="name-modal" class="modal-backdrop hidden">
-      <div class="modal-card">
-        <div class="modal-title" id="name-modal-title">新建文件</div>
-        <div class="modal-body">
-          <label class="modal-field">
-            <span>文件名</span>
-            <input id="name-input" type="text" autocomplete="off" spellcheck="false" placeholder="例如 demo">
-          </label>
-          <label class="modal-field">
-            <span>类型</span>
-            <select id="name-type">
-              <option value="yt">.yt — Rzend 计算脚本</option>
-              <option value="pyt">.pyt — MicroPython 脚本</option>
-            </select>
-          </label>
-          <div id="name-error" class="modal-error"></div>
-        </div>
-        <div class="modal-actions">
-          <button id="name-cancel" class="toolbar-btn">取消</button>
-          <button id="name-ok" class="toolbar-btn primary">创建</button>
-        </div>
-      </div>
     </div>
 
     <!-- 脚本输入（input()）对话框 -->

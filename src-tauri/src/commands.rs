@@ -62,81 +62,77 @@ fn find_mpy() -> Result<PathBuf, String> {
 
 // ---------------- 文件浏览 ----------------
 
-fn scan_directory_sync(path: &str) -> Vec<DirEntry> {
-    let dir_path = PathBuf::from(path);
+fn scan_directory_sync(path: &Path) -> Result<Vec<DirEntry>, String> {
+    let read_dir =
+        fs::read_dir(path).map_err(|e| format!("读取文件夹失败 {}: {}", path.display(), e))?;
     let mut entries = Vec::new();
-
-    if let Ok(read_dir) = fs::read_dir(&dir_path) {
-        let mut items: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
-        items.sort_by(|a, b| {
-            let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            b_is_dir
-                .cmp(&a_is_dir)
-                .then_with(|| a.file_name().cmp(&b.file_name()))
+    for entry in read_dir {
+        let entry = entry.map_err(|e| format!("读取文件夹内容失败 {}: {}", path.display(), e))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
+        let is_dir = entry
+            .file_type()
+            .map_err(|e| format!("读取文件类型失败 {}: {}", entry.path().display(), e))?
+            .is_dir();
+        entries.push(DirEntry {
+            name,
+            path: entry.path().to_string_lossy().to_string(),
+            is_dir,
+            children: None,
         });
-
-        for entry in items {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || name == "target" || name == "node_modules" {
-                continue;
-            }
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let entry_path = entry.path().to_string_lossy().to_string();
-            let children = if is_dir {
-                scan_directory_shallow(&entry.path())
-            } else {
-                None
-            };
-
-            entries.push(DirEntry {
-                name,
-                path: entry_path,
-                is_dir,
-                children,
-            });
-        }
     }
-
-    entries
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+    Ok(entries)
 }
 
 #[tauri::command]
-pub fn scan_directory(path: String) -> Vec<DirEntry> {
-    scan_directory_sync(&path)
+pub async fn scan_directory(path: String) -> Result<Vec<DirEntry>, String> {
+    blocking(move || scan_directory_sync(Path::new(&path))).await?
 }
 
-fn scan_directory_shallow(path: &PathBuf) -> Option<Vec<DirEntry>> {
-    if let Ok(read_dir) = fs::read_dir(path) {
-        let mut entries = Vec::new();
-        for entry in read_dir.filter_map(|e| e.ok()) {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || name == "target" || name == "node_modules" {
-                continue;
-            }
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            entries.push(DirEntry {
-                name,
-                path: entry.path().to_string_lossy().to_string(),
-                is_dir,
-                children: None,
-            });
+#[tauri::command]
+pub async fn read_file_content(path: String) -> Result<String, String> {
+    blocking(move || fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {}", e))).await?
+}
+
+#[tauri::command]
+pub async fn write_file_content(path: String, content: String) -> Result<(), String> {
+    blocking(move || fs::write(&path, &content).map_err(|e| format!("保存文件失败: {}", e))).await?
+}
+
+#[tauri::command]
+pub async fn create_file(
+    state: tauri::State<'_, AppState>,
+    name: String,
+) -> Result<String, String> {
+    let cwd = state.inner().cwd.clone();
+    blocking(move || {
+        let name = name.trim();
+        let relative = Path::new(name);
+        if name.is_empty()
+            || relative.components().count() != 1
+            || relative.file_name().and_then(|n| n.to_str()) != Some(name)
+        {
+            return Err("文件名必须是当前目录下的单个文件名".to_string());
         }
-        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-        Some(entries)
-    } else {
-        None
-    }
-}
 
-#[tauri::command]
-pub fn read_file_content(path: String) -> Result<String, String> {
-    fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {}", e))
-}
-
-#[tauri::command]
-pub fn write_file_content(path: String, content: String) -> Result<(), String> {
-    fs::write(&path, &content).map_err(|e| format!("保存文件失败: {}", e))
+        let path = lock(&cwd).join(relative);
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    format!("文件已存在: {}", name)
+                } else {
+                    format!("创建文件失败: {}", e)
+                }
+            })?;
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -158,7 +154,10 @@ pub async fn save_file_dialog(
 ) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
     let ext = ext.unwrap_or_else(|| "ckt".to_string());
-    let mut builder = app.dialog().file().add_filter("电路仿真文件", &[ext.as_str()]);
+    let mut builder = app
+        .dialog()
+        .file()
+        .add_filter("电路仿真文件", &[ext.as_str()]);
     if let Some(name) = default_name {
         builder = builder.set_file_name(name);
     }
@@ -202,50 +201,59 @@ pub fn shell_cd(state: tauri::State<'_, AppState>, path: String) -> Result<Strin
 }
 
 #[tauri::command]
-pub fn shell_ls(state: tauri::State<'_, AppState>) -> Vec<DirEntry> {
+pub async fn shell_ls(state: tauri::State<'_, AppState>) -> Result<Vec<DirEntry>, String> {
     let cur = lock(&state.inner().cwd).clone();
-    scan_directory_sync(&cur.to_string_lossy())
+    blocking(move || scan_directory_sync(&cur)).await?
 }
 
 #[tauri::command]
-pub fn shell_mkdir(state: tauri::State<'_, AppState>, name: String) -> Result<String, String> {
+pub async fn shell_mkdir(
+    state: tauri::State<'_, AppState>,
+    name: String,
+) -> Result<String, String> {
     let cwd = state.inner().cwd.clone();
-    let target = {
-        let cur = lock(&cwd);
-        resolve_path(&cur, &name)
-    };
-    fs::create_dir_all(&target).map_err(|e| format!("创建文件夹失败: {}", e))?;
-    Ok(format!("已创建: {}", target.display()))
+    blocking(move || {
+        let target = {
+            let cur = lock(&cwd);
+            resolve_path(&cur, &name)
+        };
+        fs::create_dir_all(&target).map_err(|e| format!("创建文件夹失败: {}", e))?;
+        Ok(format!("已创建: {}", target.display()))
+    })
+    .await?
 }
 
 #[tauri::command]
-pub fn shell_rm(state: tauri::State<'_, AppState>, name: String) -> Result<String, String> {
+pub async fn shell_rm(state: tauri::State<'_, AppState>, name: String) -> Result<String, String> {
     let cwd = state.inner().cwd.clone();
-    let target = {
-        let cur = lock(&cwd);
-        resolve_path(&cur, &name)
-    };
-    if !target.exists() {
-        return Err(format!("路径不存在: {}", target.display()));
-    }
-    let canonical = target.canonicalize().unwrap_or(target.clone());
-    // 拒绝删除磁盘根目录
-    if canonical.parent().is_none() {
-        return Err("不能删除磁盘根目录".to_string());
-    }
-    // 拒绝删除当前目录及其祖先目录（如 del .. / del ..\..）
-    let cur = lock(&cwd).clone();
-    let cwd_canon = cur.canonicalize().unwrap_or(cur);
-    if cwd_canon.starts_with(&canonical) {
-        return Err("不能删除当前所在目录或其上级目录".to_string());
-    }
-    if target.is_dir() {
-        fs::remove_dir_all(&target).map_err(|e| format!("删除文件夹失败: {}", e))?;
-        Ok(format!("已删除文件夹: {}", target.display()))
-    } else {
-        fs::remove_file(&target).map_err(|e| format!("删除文件失败: {}", e))?;
-        Ok(format!("已删除: {}", target.display()))
-    }
+    blocking(move || {
+        let target = {
+            let cur = lock(&cwd);
+            resolve_path(&cur, &name)
+        };
+        if !target.exists() {
+            return Err(format!("路径不存在: {}", target.display()));
+        }
+        let canonical = target.canonicalize().unwrap_or(target.clone());
+        // 拒绝删除磁盘根目录
+        if canonical.parent().is_none() {
+            return Err("不能删除磁盘根目录".to_string());
+        }
+        // 拒绝删除当前目录及其祖先目录（如 del .. / del ..\..）
+        let cur = lock(&cwd).clone();
+        let cwd_canon = cur.canonicalize().unwrap_or(cur);
+        if cwd_canon.starts_with(&canonical) {
+            return Err("不能删除当前所在目录或其上级目录".to_string());
+        }
+        if target.is_dir() {
+            fs::remove_dir_all(&target).map_err(|e| format!("删除文件夹失败: {}", e))?;
+            Ok(format!("已删除文件夹: {}", target.display()))
+        } else {
+            fs::remove_file(&target).map_err(|e| format!("删除文件失败: {}", e))?;
+            Ok(format!("已删除: {}", target.display()))
+        }
+    })
+    .await?
 }
 
 // ---------------- .yt 求值 ----------------
@@ -268,7 +276,10 @@ fn eval_block_guarded(
 }
 
 #[tauri::command]
-pub async fn yt_eval(state: tauri::State<'_, AppState>, code: String) -> Result<EvalResult, String> {
+pub async fn yt_eval(
+    state: tauri::State<'_, AppState>,
+    code: String,
+) -> Result<EvalResult, String> {
     let yt = state.inner().yt.clone();
     blocking(move || {
         let mut env = lock(&yt);
@@ -439,25 +450,38 @@ fn is_statement(line: &str) -> bool {
         return true;
     }
     const KEYWORDS: [&str; 25] = [
-        "import", "from", "def", "class", "for", "while", "if", "elif", "else", "try",
-        "except", "finally", "with", "return", "yield", "pass", "break", "continue",
-        "global", "nonlocal", "del", "assert", "print", "input", "exec",
+        "import", "from", "def", "class", "for", "while", "if", "elif", "else", "try", "except",
+        "finally", "with", "return", "yield", "pass", "break", "continue", "global", "nonlocal",
+        "del", "assert", "print", "input", "exec",
     ];
-    let first = t.split(|c: char| c.is_whitespace() || c == '(' || c == ':').next().unwrap_or("");
+    let first = t
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ':')
+        .next()
+        .unwrap_or("");
     if KEYWORDS.contains(&first) {
         return true;
     }
-    // 顶层赋值（排除 == != <= >= += 等）
-    let bytes: Vec<char> = t.chars().collect();
-    for i in 0..bytes.len() {
-        if bytes[i] == '=' {
-            let prev = if i > 0 { bytes[i - 1] } else { ' ' };
-            let next = if i + 1 < bytes.len() { bytes[i + 1] } else { ' ' };
-            if next == '=' || prev == '=' || prev == '!' || prev == '<' || prev == '>' || prev == '+' || prev == '-' || prev == '*' || prev == '/' {
+    // 顶层赋值（排除 == != <= >= += 等）；零分配扫描
+    let mut prev = ' ';
+    for (i, c) in t.char_indices() {
+        if c == '=' {
+            let next = t[i + c.len_utf8()..].chars().next().unwrap_or(' ');
+            if next == '='
+                || prev == '='
+                || prev == '!'
+                || prev == '<'
+                || prev == '>'
+                || prev == '+'
+                || prev == '-'
+                || prev == '*'
+                || prev == '/'
+            {
+                prev = c;
                 continue;
             }
             return true;
         }
+        prev = c;
     }
     false
 }

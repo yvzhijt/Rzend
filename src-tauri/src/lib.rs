@@ -64,6 +64,7 @@ pub fn run() {
             commands::scan_directory,
             commands::read_file_content,
             commands::write_file_content,
+            commands::create_file,
             commands::open_folder_dialog,
             commands::save_file_dialog,
             commands::get_initial_dir,

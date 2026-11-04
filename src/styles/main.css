@@ -153,6 +153,7 @@ body.dragging-y { cursor: row-resize; user-select: none; }
 .tree-arrow { width: 14px; color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
 .tree-icon { flex-shrink: 0; }
 .tree-name { overflow: hidden; text-overflow: ellipsis; }
+.tree-message { padding: 3px 8px; color: var(--text-dim); font-size: 11px; }
 
 .placeholder-content { padding: 16px; color: var(--text-dim); text-align: center; font-size: 12px; }
 
