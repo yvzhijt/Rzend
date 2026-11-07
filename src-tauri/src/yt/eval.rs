@@ -1,482 +1,17 @@
-// .yt 语言解释器：变量、矩阵、内置函数、函数声明、plot
-use serde::Serialize;
+// .yt 语言求值：环境、表达式求值、内置函数、求根/积分/绘图采样
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use num_complex::Complex64;
 
 use crate::WorkspaceVar;
+use crate::yt::lexer::{lex, strip_comment, Tok, MAX_DEPTH};
+use crate::yt::math::*;
+use crate::yt::parser::{parse_expression, Parser};
+use crate::yt::value::*;
 
-mod math;
-use math::{
-    expression_polynomial, matrix_det, matrix_eigen, matrix_inverse, matrix_rank, matrix_rref,
-    polynomial_roots, trim_polynomial, value_as_complex,
-};
-
-// ---------------- 值与表达式 ----------------
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Value {
-    Num(f64),
-    Complex(Complex64),
-    Mat(Vec<Vec<f64>>),
-    ComplexVec(Vec<Complex64>),
-    Func(UserFunc),
-    Eigen {
-        values: Vec<Complex64>,
-        vectors: Vec<Vec<Complex64>>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct UserFunc {
-    pub param: String,
-    pub body: Expr,
-    pub src: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
-    Num(f64),
-    Text(String),
-    Var(String),
-    MatLit(Vec<Vec<Expr>>),
-    Neg(Box<Expr>),
-    Transpose(Box<Expr>),
-    Bin(BinOp, Box<Expr>, Box<Expr>),
-    Call(String, Vec<Expr>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Pow,
-}
-
-// ---------------- 输出结构 ----------------
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Series {
-    pub name: String,
-    pub xs: Vec<f64>,
-    pub ys: Vec<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct PlotData {
-    pub series: Vec<Series>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct EvalOutput {
-    pub text: String,
-    pub is_error: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct EvalResult {
-    pub outputs: Vec<EvalOutput>,
-    pub plot: Option<PlotData>,
-    pub vars: Vec<WorkspaceVar>,
-}
-
-// ---------------- 词法 ----------------
-
-#[derive(Debug, Clone, PartialEq)]
-enum Tok {
-    Num(f64),
-    Ident(String),
-    Text(String),
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    Pow,
-    Transpose,
-    LParen,
-    RParen,
-    LBracket,
-    RBracket,
-    Comma,
-    Semicolon,
-    Assign,
-    Arrow,
-}
-
-fn strip_comment(line: &str) -> &str {
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut chars = line.char_indices().peekable();
-    while let Some((index, ch)) = chars.next() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-        } else if ch == '"' {
-            in_string = true;
-        } else if ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '/') {
-            return &line[..index];
-        }
-    }
-    line
-}
-
-fn lex(line: &str) -> Result<Vec<Tok>, String> {
-    let chars: Vec<char> = line.chars().collect();
-    let mut toks = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        match c {
-            ' ' | '\t' | '\r' => i += 1,
-            '"' => {
-                i += 1;
-                let mut value = String::new();
-                let mut closed = false;
-                while i < chars.len() {
-                    match chars[i] {
-                        '"' => {
-                            i += 1;
-                            closed = true;
-                            break;
-                        }
-                        '\\' if i + 1 < chars.len() => {
-                            i += 1;
-                            match chars[i] {
-                                '"' => value.push('"'),
-                                '\\' => value.push('\\'),
-                                escaped => {
-                                    value.push('\\');
-                                    value.push(escaped);
-                                }
-                            }
-                            i += 1;
-                        }
-                        ch => {
-                            value.push(ch);
-                            i += 1;
-                        }
-                    }
-                }
-                if !closed {
-                    return Err("字符串缺少结束引号".to_string());
-                }
-                toks.push(Tok::Text(value));
-            }
-            '0'..='9' | '.' => {
-                let start = i;
-                let mut dots = 0;
-                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                    if chars[i] == '.' {
-                        dots += 1;
-                    }
-                    i += 1;
-                }
-                let s: String = chars[start..i].iter().collect();
-                if dots > 1 || s == "." {
-                    return Err(format!("无法解析数字 '{}'", s));
-                }
-                let v: f64 = s.parse().map_err(|_| format!("无法解析数字 '{}'", s))?;
-                toks.push(Tok::Num(v));
-            }
-            'a'..='z' | 'A'..='Z' | '_' => {
-                let start = i;
-                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                    i += 1;
-                }
-                toks.push(Tok::Ident(chars[start..i].iter().collect()));
-            }
-            '+' => {
-                toks.push(Tok::Plus);
-                i += 1;
-            }
-            '-' => {
-                // 支持 "y->x" 与 "y- >x"（中间允许空格）
-                let mut j = i + 1;
-                while j < chars.len() && chars[j] == ' ' {
-                    j += 1;
-                }
-                if j < chars.len() && chars[j] == '>' {
-                    toks.push(Tok::Arrow);
-                    i = j + 1;
-                } else {
-                    toks.push(Tok::Minus);
-                    i += 1;
-                }
-            }
-            '*' => {
-                if i + 1 < chars.len() && chars[i + 1] == '*' {
-                    toks.push(Tok::Pow);
-                    i += 2;
-                } else {
-                    toks.push(Tok::Star);
-                    i += 1;
-                }
-            }
-            '/' => {
-                toks.push(Tok::Slash);
-                i += 1;
-            }
-            '^' => {
-                toks.push(Tok::Pow);
-                i += 1;
-            }
-            '\'' => {
-                toks.push(Tok::Transpose);
-                i += 1;
-            }
-            '(' => {
-                toks.push(Tok::LParen);
-                i += 1;
-            }
-            ')' => {
-                toks.push(Tok::RParen);
-                i += 1;
-            }
-            '[' => {
-                toks.push(Tok::LBracket);
-                i += 1;
-            }
-            ']' => {
-                toks.push(Tok::RBracket);
-                i += 1;
-            }
-            ',' => {
-                toks.push(Tok::Comma);
-                i += 1;
-            }
-            ';' => {
-                toks.push(Tok::Semicolon);
-                i += 1;
-            }
-            '=' => {
-                toks.push(Tok::Assign);
-                i += 1;
-            }
-            _ => return Err(format!("无法识别的字符 '{}'", c)),
-        }
-    }
-    Ok(toks)
-}
-
-// 递归深度上限：防止括号嵌套或函数自递归导致栈溢出
-const MAX_DEPTH: usize = 256;
-
-// ---------------- 语法 ----------------
-
-struct Parser<'a> {
-    toks: &'a [Tok],
-    pos: usize,
-    depth: usize,
-}
-
-impl<'a> Parser<'a> {
-    fn new(toks: &'a [Tok]) -> Self {
-        Parser {
-            toks,
-            pos: 0,
-            depth: 0,
-        }
-    }
-
-    fn peek(&self) -> Option<&'a Tok> {
-        self.toks.get(self.pos)
-    }
-
-    fn next(&mut self) -> Option<&'a Tok> {
-        let t = self.toks.get(self.pos);
-        if t.is_some() {
-            self.pos += 1;
-        }
-        t
-    }
-
-    fn expect(&mut self, t: &Tok) -> Result<(), String> {
-        match self.next() {
-            Some(x) if x == t => Ok(()),
-            other => Err(format!("语法错误：期望 {:?}，得到 {:?}", t, other)),
-        }
-    }
-
-    fn parse_expr(&mut self) -> Result<Expr, String> {
-        self.depth += 1;
-        if self.depth > MAX_DEPTH {
-            self.depth -= 1;
-            return Err("表达式嵌套过深".to_string());
-        }
-        let r = self.parse_add();
-        self.depth -= 1;
-        r
-    }
-
-    fn parse_add(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_mul()?;
-        loop {
-            match self.peek() {
-                Some(Tok::Plus) => {
-                    self.next();
-                    let right = self.parse_mul()?;
-                    left = Expr::Bin(BinOp::Add, Box::new(left), Box::new(right));
-                }
-                Some(Tok::Minus) => {
-                    self.next();
-                    let right = self.parse_mul()?;
-                    left = Expr::Bin(BinOp::Sub, Box::new(left), Box::new(right));
-                }
-                _ => break,
-            }
-        }
-        Ok(left)
-    }
-
-    fn parse_mul(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_unary()?;
-        loop {
-            match self.peek() {
-                Some(Tok::Star) => {
-                    self.next();
-                    let right = self.parse_unary()?;
-                    left = Expr::Bin(BinOp::Mul, Box::new(left), Box::new(right));
-                }
-                Some(Tok::Slash) => {
-                    self.next();
-                    let right = self.parse_unary()?;
-                    left = Expr::Bin(BinOp::Div, Box::new(left), Box::new(right));
-                }
-                _ => break,
-            }
-        }
-        Ok(left)
-    }
-
-    fn parse_unary(&mut self) -> Result<Expr, String> {
-        self.depth += 1;
-        if self.depth > MAX_DEPTH {
-            self.depth -= 1;
-            return Err("表达式嵌套过深".to_string());
-        }
-        let r = self.parse_unary_inner();
-        self.depth -= 1;
-        r
-    }
-
-    fn parse_unary_inner(&mut self) -> Result<Expr, String> {
-        match self.peek() {
-            Some(Tok::Minus) => {
-                self.next();
-                Ok(Expr::Neg(Box::new(self.parse_unary()?)))
-            }
-            Some(Tok::Plus) => {
-                self.next();
-                self.parse_unary()
-            }
-            _ => self.parse_pow(),
-        }
-    }
-
-    fn parse_pow(&mut self) -> Result<Expr, String> {
-        let base = self.parse_postfix()?;
-        if matches!(self.peek(), Some(Tok::Pow)) {
-            self.next();
-            let exp = self.parse_unary()?;
-            Ok(Expr::Bin(BinOp::Pow, Box::new(base), Box::new(exp)))
-        } else {
-            Ok(base)
-        }
-    }
-
-    fn parse_postfix(&mut self) -> Result<Expr, String> {
-        let mut e = self.parse_primary()?;
-        while matches!(self.peek(), Some(Tok::Transpose)) {
-            self.next();
-            e = Expr::Transpose(Box::new(e));
-        }
-        Ok(e)
-    }
-
-    fn parse_primary(&mut self) -> Result<Expr, String> {
-        match self.next() {
-            Some(Tok::Num(v)) => Ok(Expr::Num(*v)),
-            Some(Tok::Text(value)) => Ok(Expr::Text(value.clone())),
-            Some(Tok::Ident(name)) => {
-                if matches!(self.peek(), Some(Tok::LParen)) {
-                    self.next();
-                    let mut args = Vec::new();
-                    if !matches!(self.peek(), Some(Tok::RParen)) {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            match self.peek() {
-                                Some(Tok::Comma) => {
-                                    self.next();
-                                }
-                                _ => break,
-                            }
-                        }
-                    }
-                    self.expect(&Tok::RParen)?;
-                    Ok(Expr::Call(name.clone(), args))
-                } else {
-                    Ok(Expr::Var(name.clone()))
-                }
-            }
-            Some(Tok::LParen) => {
-                let e = self.parse_expr()?;
-                self.expect(&Tok::RParen)?;
-                Ok(e)
-            }
-            Some(Tok::LBracket) => self.parse_matrix(),
-            other => Err(format!("语法错误：意外的 {:?}", other)),
-        }
-    }
-
-    // [1,2;3,4] 或 [1 2;3 4]
-    fn parse_matrix(&mut self) -> Result<Expr, String> {
-        let mut rows: Vec<Vec<Expr>> = Vec::new();
-        if matches!(self.peek(), Some(Tok::RBracket)) {
-            self.next();
-            return Ok(Expr::MatLit(vec![]));
-        }
-        loop {
-            let mut row = Vec::new();
-            loop {
-                row.push(self.parse_expr()?);
-                match self.peek() {
-                    Some(Tok::Comma) => {
-                        self.next();
-                    }
-                    Some(Tok::Semicolon) | Some(Tok::RBracket) => break,
-                    Some(_) => continue, // 空格分隔
-                    None => return Err("语法错误：矩阵未闭合".to_string()),
-                }
-            }
-            rows.push(row);
-            match self.peek() {
-                Some(Tok::Semicolon) => {
-                    self.next();
-                }
-                Some(Tok::RBracket) => {
-                    self.next();
-                    break;
-                }
-                other => return Err(format!("语法错误：矩阵中意外的 {:?}", other)),
-            }
-        }
-        let cols = rows[0].len();
-        if rows.iter().any(|r| r.len() != cols) {
-            return Err("矩阵每行的列数必须一致".to_string());
-        }
-        Ok(Expr::MatLit(rows))
-    }
-}
-
-// ---------------- 求值 ----------------
+// ---------------- 环境 ----------------
 
 pub struct Env {
     vars: HashMap<String, Value>,
@@ -604,7 +139,7 @@ impl Env {
         self.eval(&expr)
     }
 
-    fn eval(&mut self, expr: &Expr) -> Result<Value, String> {
+    pub(crate) fn eval(&mut self, expr: &Expr) -> Result<Value, String> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             self.depth -= 1;
@@ -701,7 +236,7 @@ impl Env {
                 } else {
                     self.working_dir.join(path)
                 };
-                return Ok(Value::Mat(math::read_grayscale_image(&full_path)?));
+                return Ok(Value::Mat(read_grayscale_image(&full_path)?));
             }
             "savetu" => {
                 if args.len() != 2 {
@@ -720,7 +255,7 @@ impl Env {
                 } else {
                     self.working_dir.join(path)
                 };
-                math::save_grayscale_image(&matrix, &full_path)?;
+                save_grayscale_image(&matrix, &full_path)?;
                 return Ok(Value::Num(1.0));
             }
             "H" => {
@@ -994,9 +529,11 @@ impl Env {
                 let v = &self.vars[&n];
                 let (value, var_type, size) = match v {
                     Value::Num(x) => (fmt_num(*x), "double".to_string(), "1×1".to_string()),
-                    Value::Complex(x) => {
-                        (fmt_complex(*x), "complex".to_string(), "1×1".to_string())
-                    }
+                    Value::Complex(x) => (
+                        fmt_complex(*x),
+                        "complex".to_string(),
+                        "1×1".to_string(),
+                    ),
                     Value::ComplexVec(values) => (
                         fmt_complex_vec(values),
                         "complex vector".to_string(),
@@ -1066,6 +603,8 @@ impl Env {
     }
 }
 
+// ---------------- 辅助：参数切分 ----------------
+
 fn split_top_level_args(toks: &[Tok]) -> Vec<&[Tok]> {
     let mut args = Vec::new();
     let mut start = 0;
@@ -1085,17 +624,7 @@ fn split_top_level_args(toks: &[Tok]) -> Vec<&[Tok]> {
     args
 }
 
-fn parse_expression(toks: &[Tok]) -> Result<Expr, String> {
-    if toks.is_empty() {
-        return Err("表达式不能为空".to_string());
-    }
-    let mut parser = Parser::new(toks);
-    let expr = parser.parse_expr()?;
-    if parser.pos != parser.toks.len() {
-        return Err("表达式末尾有多余内容".to_string());
-    }
-    Ok(expr)
-}
+// ---------------- 辅助：求根与积分 ----------------
 
 fn eval_func_at(env: &mut Env, func: &UserFunc, x: f64) -> Result<f64, String> {
     let saved = env.vars.insert(func.param.clone(), Value::Num(x));
@@ -1644,143 +1173,7 @@ fn sample_func(
     (xs, real, has_imaginary.then_some(imaginary))
 }
 
-// ---------------- 显示格式化 ----------------
-
-pub fn fmt_num(v: f64) -> String {
-    if v == 0.0 {
-        return "0".to_string();
-    }
-    if v == v.trunc() && v.abs() < 1e15 {
-        return format!("{}", v as i64);
-    }
-    let s = format!("{:.10}", v);
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s == "-0" {
-        "0".to_string()
-    } else {
-        s.to_string()
-    }
-}
-
-fn fmt_value(v: &Value) -> String {
-    match v {
-        Value::Num(x) => format!("   {}", fmt_num(*x)),
-        Value::Complex(x) => format!("   {}", fmt_complex(*x)),
-        Value::ComplexVec(values) => fmt_complex_vec(values),
-        Value::Mat(m) => fmt_mat(m),
-        Value::Func(f) => format!("   函数({})", f.param),
-        Value::Eigen { values, vectors } => format!(
-            "   特征值：\n{}\n\n   特征向量（每列对应一个特征值）：\n{}",
-            fmt_complex_mat(&[values.clone()]),
-            fmt_complex_mat(vectors)
-        ),
-    }
-}
-
-fn fmt_complex(value: Complex64) -> String {
-    let re = if value.re.abs() < 1e-12 {
-        0.0
-    } else {
-        value.re
-    };
-    let im = if value.im.abs() < 1e-12 {
-        0.0
-    } else {
-        value.im
-    };
-    match (re, im) {
-        (re, 0.0) => fmt_num(re),
-        (0.0, im) if im == 1.0 => "i".to_string(),
-        (0.0, im) if im == -1.0 => "-i".to_string(),
-        (0.0, im) => format!("{}i", fmt_num(im)),
-        (re, im) if im == 1.0 => format!("{}+i", fmt_num(re)),
-        (re, im) if im == -1.0 => format!("{}-i", fmt_num(re)),
-        (re, im) if im > 0.0 => format!("{}+{}i", fmt_num(re), fmt_num(im)),
-        (re, im) => format!("{}{}i", fmt_num(re), fmt_num(im)),
-    }
-}
-
-fn fmt_complex_vec(values: &[Complex64]) -> String {
-    format!(
-        "   {}",
-        values
-            .iter()
-            .map(|&v| fmt_complex(v))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
-fn fmt_complex_mat(matrix: &[Vec<Complex64>]) -> String {
-    if matrix.is_empty() {
-        return "   []".to_string();
-    }
-    let cells: Vec<Vec<String>> = matrix
-        .iter()
-        .map(|row| row.iter().map(|&value| fmt_complex(value)).collect())
-        .collect();
-    let cols = cells.iter().map(Vec::len).max().unwrap_or(0);
-    let mut widths = vec![0; cols];
-    for row in &cells {
-        for (col, value) in row.iter().enumerate() {
-            widths[col] = widths[col].max(value.len());
-        }
-    }
-    let mut out = String::new();
-    for row in &cells {
-        out.push_str("   ");
-        for (col, value) in row.iter().enumerate() {
-            out.push_str(&format!("{:>width$}  ", value, width = widths[col]));
-        }
-        out.push('\n');
-    }
-    out.trim_end().to_string()
-}
-
-fn fmt_mat(m: &[Vec<f64>]) -> String {
-    if m.is_empty() {
-        return "   []".to_string();
-    }
-    let cols = m.first().map_or(0, Vec::len);
-    if m.len().saturating_mul(cols) > MAX_INLINE_MATRIX_CELLS {
-        return format!("   {}×{} 矩阵（内容已省略）", m.len(), cols);
-    }
-    // 防御：按最长行分配列宽，避免参差矩阵越界
-    let cols = m.iter().map(|r| r.len()).max().unwrap_or(0);
-    let mut widths = vec![0usize; cols];
-    let cells: Vec<Vec<String>> = m
-        .iter()
-        .map(|row| row.iter().map(|v| fmt_num(*v)).collect())
-        .collect();
-    for row in &cells {
-        for (j, c) in row.iter().enumerate() {
-            widths[j] = widths[j].max(c.len());
-        }
-    }
-    let mut out = String::new();
-    for row in &cells {
-        out.push_str("   ");
-        for (j, c) in row.iter().enumerate() {
-            out.push_str(&format!("{:>width$}  ", c, width = widths[j]));
-        }
-        out.push('\n');
-    }
-    out.trim_end().to_string()
-}
-
-fn fmt_mat_compact(m: &[Vec<f64>]) -> String {
-    let cols = m.first().map_or(0, Vec::len);
-    if m.len().saturating_mul(cols) > MAX_INLINE_MATRIX_CELLS {
-        return format!("{}×{} 矩阵（内容已省略）", m.len(), cols);
-    }
-    let rows: Vec<String> = m
-        .iter()
-        .map(|r| r.iter().map(|v| fmt_num(*v)).collect::<Vec<_>>().join(","))
-        .collect();
-    format!("[{}]", rows.join(";"))
-}
-
-const MAX_INLINE_MATRIX_CELLS: usize = 256;
+// ---------------- 测试 ----------------
 
 #[cfg(test)]
 mod tests {

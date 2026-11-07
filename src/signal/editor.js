@@ -35,10 +35,6 @@ const SUM_R = 16;
 const PICK_R = 6;
 const PROBE_R = 10;
 
-function nodeCenter(node) {
-  return { x: node.x + SG_W / 2, y: node.y + SG_H / 2 };
-}
-
 function nodeRot(b) {
   return ((b.rot || 0) % 360 + 360) % 360;
 }

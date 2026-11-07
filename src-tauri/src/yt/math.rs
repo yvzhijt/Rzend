@@ -4,17 +4,17 @@ use image::{ImageReader, Limits};
 use num_complex::Complex64;
 use std::path::Path;
 
-use super::{BinOp, Env, Expr};
+use crate::yt::{BinOp, Env, Expr, Value};
 
-pub(super) fn value_as_complex(value: super::Value) -> Option<Complex64> {
+pub(crate) fn value_as_complex(value: Value) -> Option<Complex64> {
     match value {
-        super::Value::Num(value) => Some(Complex64::new(value, 0.0)),
-        super::Value::Complex(value) => Some(value),
+        Value::Num(value) => Some(Complex64::new(value, 0.0)),
+        Value::Complex(value) => Some(value),
         _ => None,
     }
 }
 
-pub(super) fn expression_polynomial(
+pub(crate) fn expression_polynomial(
     env: &mut Env,
     expr: &Expr,
     variable: &str,
@@ -96,7 +96,7 @@ fn poly_mul(a: &[Complex64], b: &[Complex64]) -> Vec<Complex64> {
     out
 }
 
-pub(super) fn trim_polynomial(poly: &mut Vec<Complex64>) {
+pub(crate) fn trim_polynomial(poly: &mut Vec<Complex64>) {
     while poly.len() > 1 && poly.last().is_some_and(|c| c.norm() < 1e-14) {
         poly.pop();
     }
@@ -123,7 +123,7 @@ fn matrix_to_rows(matrix: &Mat<f64>) -> Vec<Vec<f64>> {
         .collect()
 }
 
-pub(super) fn read_grayscale_image(path: &Path) -> Result<Vec<Vec<f64>>, String> {
+pub(crate) fn read_grayscale_image(path: &Path) -> Result<Vec<Vec<f64>>, String> {
     let mut reader = ImageReader::open(path)
         .map_err(|error| format!("无法打开图片 {}: {}", path.display(), error))?;
     let mut limits = Limits::default();
@@ -155,7 +155,7 @@ pub(super) fn read_grayscale_image(path: &Path) -> Result<Vec<Vec<f64>>, String>
         .collect())
 }
 
-pub(super) fn save_grayscale_image(matrix: &[Vec<f64>], path: &Path) -> Result<(), String> {
+pub(crate) fn save_grayscale_image(matrix: &[Vec<f64>], path: &Path) -> Result<(), String> {
     let height = matrix.len();
     let width = matrix.first().map_or(0, Vec::len);
     if height == 0 || width == 0 || matrix.iter().any(|row| row.len() != width) {
@@ -186,7 +186,7 @@ pub(super) fn save_grayscale_image(matrix: &[Vec<f64>], path: &Path) -> Result<(
         .map_err(|error| format!("保存图片失败 {}: {}", path.display(), error))
 }
 
-pub(super) fn matrix_det(matrix: &[Vec<f64>]) -> Result<f64, String> {
+pub(crate) fn matrix_det(matrix: &[Vec<f64>]) -> Result<f64, String> {
     let n = matrix.len();
     if n == 0 || matrix.iter().any(|row| row.len() != n) {
         return Err("H() 要求方阵".to_string());
@@ -200,7 +200,7 @@ pub(super) fn matrix_det(matrix: &[Vec<f64>]) -> Result<f64, String> {
     Ok(a.as_ref().determinant())
 }
 
-pub(super) fn matrix_inverse(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
+pub(crate) fn matrix_inverse(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
     let n = matrix.len();
     if n == 0 || matrix.iter().any(|row| row.len() != n) {
         return Err("N() 要求方阵".to_string());
@@ -214,7 +214,7 @@ pub(super) fn matrix_inverse(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, Strin
     Ok(matrix_to_rows(&lu.inverse()))
 }
 
-pub(super) fn matrix_rank(matrix: &[Vec<f64>]) -> Result<usize, String> {
+pub(crate) fn matrix_rank(matrix: &[Vec<f64>]) -> Result<usize, String> {
     let rows = matrix.len();
     let cols = matrix.first().map_or(0, Vec::len);
     if rows == 0 || cols == 0 || matrix.iter().any(|row| row.len() != cols) {
@@ -228,7 +228,7 @@ pub(super) fn matrix_rank(matrix: &[Vec<f64>]) -> Result<usize, String> {
         .count())
 }
 
-pub(super) fn matrix_rref(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
+pub(crate) fn matrix_rref(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
     let rows = matrix.len();
     let cols = matrix.first().map_or(0, Vec::len);
     if rows == 0 || cols == 0 || matrix.iter().any(|row| row.len() != cols) {
@@ -280,7 +280,7 @@ pub(super) fn matrix_rref(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> 
     Ok(matrix_to_rows(&out))
 }
 
-pub(super) fn polynomial_roots(coefficients: &[Complex64]) -> Result<Vec<Complex64>, String> {
+pub(crate) fn polynomial_roots(coefficients: &[Complex64]) -> Result<Vec<Complex64>, String> {
     let degree = coefficients.len().saturating_sub(1);
     if degree == 0 {
         return Err("方程没有有限根".to_string());
@@ -379,7 +379,7 @@ fn durand_kerner_roots(coefficients: &[Complex64]) -> Result<Vec<Complex64>, Str
 
 /// 特征分解（faer 实现）：返回 (特征值, 特征向量按行存储)。
 /// faer 的特征值顺序未指定，这里统一按 (re, im) 稳定排序，保持输出可预期。
-pub(super) fn matrix_eigen(
+pub(crate) fn matrix_eigen(
     matrix: &[Vec<f64>],
 ) -> Result<(Vec<Complex64>, Vec<Vec<Complex64>>), String> {
     let n = matrix.len();
