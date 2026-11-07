@@ -6,6 +6,9 @@ export const C = {
   path: null,
   sel: null,        // { kind:'el'|'net', id }
   drag: null,
+  selSet: [],       // 框选/整体移动时的多选集合（元件 id）
+  dragging: null,   // 'marquee' 表示正在框选
+  marquee: null,    // { x0, y0, x1, y1, wireId }
   pending: null,    // { port:'elId:pin', bends:[{x,y}] }
   cursor: null,
   snap: null,       // { port, x, y }

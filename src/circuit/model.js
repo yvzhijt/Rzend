@@ -73,17 +73,14 @@ export const ELEMENTS = {
       { key: 'n', label: '理想因子 n', def: 1.8 },
     ],
   },
-  GND: { cn: '接地', en: 'Ground', group: '电源', pins: 1, color: '#44515c', params: [] },
+  GND: { cn: '接地', en: 'Ground', group: '参考', pins: 1, color: '#44515c', params: [] },
   A: { cn: '电流表', en: 'Ammeter', group: '测量', pins: 2, color: '#7e2f8e', params: [], meter: 'A' },
   VM: { cn: '电压表', en: 'Voltmeter', group: '测量', pins: 2, color: '#7e2f8e', params: [], meter: 'V' },
   P: { cn: '示波器探针', en: 'Scope Probe', group: '测量', pins: 1, color: '#77ac30', params: [], probe: true },
   NOT: { cn: '非门', en: 'NOT Gate', group: '数字逻辑', pins: 2, color: '#8a4fb5', params: logicParams() },
   AND: { cn: '与门', en: 'AND Gate', group: '数字逻辑', pins: 3, color: '#8a4fb5', params: logicParams() },
-  NAND: { cn: '与非门', en: 'NAND Gate', group: '数字逻辑', pins: 3, color: '#8a4fb5', params: logicParams() },
   OR: { cn: '或门', en: 'OR Gate', group: '数字逻辑', pins: 3, color: '#8a4fb5', params: logicParams() },
-  NOR: { cn: '或非门', en: 'NOR Gate', group: '数字逻辑', pins: 3, color: '#8a4fb5', params: logicParams() },
   XOR: { cn: '异或门', en: 'XOR Gate', group: '数字逻辑', pins: 3, color: '#8a4fb5', params: logicParams() },
-  XNOR: { cn: '同或门', en: 'XNOR Gate', group: '数字逻辑', pins: 3, color: '#8a4fb5', params: logicParams() },
 };
 
 function logicParams() {
@@ -100,7 +97,7 @@ export const W = 120;
 export const H = 48;
 
 // 数字逻辑门类型集合：共用引脚几何与输入判定机制
-const LOGIC_TYPES = new Set(['NOT', 'AND', 'NAND', 'OR', 'NOR', 'XOR', 'XNOR']);
+const LOGIC_TYPES = new Set(['NOT', 'AND', 'OR', 'XOR']);
 
 /* ---------------- 网格 ----------------
  * 12px 栅格、原点偏移 6px。元件原点放在格点上时，任意 90° 旋转后
@@ -137,7 +134,7 @@ export function pinLocal(type, index) {
     return { x: W, y: H / 2 };
   }
   if (def.pins === 1) {
-    return type === 'GND' ? { x: W / 2, y: H } : { x: 0, y: H / 2 };
+    return type === 'GND' ? { x: W / 2, y: 0 } : { x: 0, y: H / 2 };
   }
   return index === 0
     ? { x: 0, y: H / 2 }
@@ -332,7 +329,8 @@ class SignalSource extends Component {
     if (this.type === 'IMP') return 'δ(t)';
     if (this.type === 'STEP') return 'u(t)';
     if (this.type === 'RAMP') return 't·u(t)';
-    return '½t²·u(t)';
+    if (this.type === 'PARABOLA') return '½t²·u(t)';
+    return '';
   }
   stamp(ctx) {
     ctx.stampV(ctx.node(1), ctx.node(0), voltageSourceValue(this, ctx.t, ctx.dt), ctx.row);
@@ -386,11 +384,8 @@ class Diode extends Component {
 const GATE_OPS = {
   NOT: (a) => !a,
   AND: (a, b) => a && b,
-  NAND: (a, b) => !(a && b),
   OR: (a, b) => a || b,
-  NOR: (a, b) => !(a || b),
   XOR: (a, b) => a !== b,
-  XNOR: (a, b) => a === b,
 };
 
 class LogicGate extends Component {
@@ -474,11 +469,8 @@ const COMPONENT_CLASSES = {
   D: Diode,
   NOT: LogicGate,
   AND: LogicGate,
-  NAND: LogicGate,
   OR: LogicGate,
-  NOR: LogicGate,
   XOR: LogicGate,
-  XNOR: LogicGate,
   GND: Ground,
   A: Ammeter,
   VM: Voltmeter,
@@ -501,8 +493,6 @@ const BRANCH_TYPES = new Set(['V', 'VS', 'CLK', 'IMP', 'STEP', 'RAMP', 'PARABOLA
 export function newNet() {
   return { id: uid('n'), ports: [], segs: [], junctions: [] };
 }
-
-const SIGNAL_SOURCE_TYPES = new Set(['V', 'VS', 'CLK', 'IMP', 'STEP', 'RAMP', 'PARABOLA']);
 
 export function validPort(byId, key) {
   const [id, i] = String(key).split(':');
@@ -619,12 +609,6 @@ export function initSimulation(model, opts = {}) {
     if (i > 0) z[i - 1] -= cur;
     if (j > 0) z[j - 1] += cur;
   };
-  const stampVCCS = (p, q, cp, cq, gain) => {
-    if (p > 0 && cp > 0) A[p - 1][cp - 1] += gain;
-    if (p > 0 && cq > 0) A[p - 1][cq - 1] -= gain;
-    if (q > 0 && cp > 0) A[q - 1][cp - 1] -= gain;
-    if (q > 0 && cq > 0) A[q - 1][cq - 1] += gain;
-  };
   const stampV = (p, q, value, row) => {
     if (p > 0) {
       A[row][p - 1] += 1;
@@ -650,7 +634,7 @@ export function initSimulation(model, opts = {}) {
     nodesOf, rowOf, logicGates,
     state, readings, probes, record,
     A, z, G_MIN,
-    stampG, stampI, stampV, stampVCCS, resetLinear,
+    stampG, stampI, stampV, resetLinear,
     t: 0,
     stepIndex: 0,
     x: null,
@@ -665,7 +649,7 @@ export function stepSimulation(sim) {
   const step = sim.stepIndex;
   const {
     dt, nodeCount, n, comps, nodesOf, rowOf, logicGates, state, readings, probes,
-    A, resetLinear, G_MIN, stampG, stampI, stampV, stampVCCS,
+    A, resetLinear, G_MIN, stampG, stampI, stampV,
   } = sim;
   const t = step * dt;
   let x = null;
@@ -681,7 +665,7 @@ export function stepSimulation(sim) {
       const nodes = nodesOf[ci];
       comps[ci].stamp({
         dt, t, n, state, readings, probes,
-        stampG, stampI, stampV, stampVCCS,
+        stampG, stampI, stampV,
         node: (i) => nodes[i],
         row: rowOf[ci],
       });

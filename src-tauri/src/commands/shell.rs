@@ -139,8 +139,13 @@ pub async fn shell_spawn(
         }
     };
 
-    let mut cmd = std::process::Command::new("cmd.exe");
-    cmd.args(["/C", &command])
+    // 与内嵌终端保持一致，用 PowerShell 执行；强制 UTF-8 输出避免中文乱码
+    let wrapped = format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {}",
+        command
+    );
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-Command", &wrapped])
         .current_dir(&working_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

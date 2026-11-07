@@ -33,6 +33,23 @@
             <button class="menu-item" id="mi-clear-ws"><span>清空工作区</span><span class="menu-hotkey">clear</span></button>
             <div class="menu-sep"></div>
             <button class="menu-item" id="mi-terminal"><span>切换终端</span><span class="menu-hotkey">Ctrl+`</span></button>
+            <div class="menu-sep"></div>
+            <div class="menu-item has-submenu">
+              <span>字体大小</span><span class="font-arrow">▸</span>
+              <div class="menu-dropdown">
+                <div class="font-submenu-body" id="font-submenu-body">
+                  <div class="font-row"><span>字号偏移</span><strong id="font-value">默认</strong></div>
+                  <input type="range" id="font-range" min="-10" max="10" step="1" value="0" />
+                  <div class="font-presets">
+                    <button type="button" class="menu-item" data-font="-10">最小（−10）</button>
+                    <button type="button" class="menu-item" data-font="-5">较小（−5）</button>
+                    <button type="button" class="menu-item" data-font="0">默认</button>
+                    <button type="button" class="menu-item" data-font="5">较大（+5）</button>
+                    <button type="button" class="menu-item" data-font="10">最大（+10）</button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
         <!-- 仿真 -->

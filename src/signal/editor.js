@@ -18,6 +18,7 @@ import { analyzeSignalGraph } from './analysis.js';
 import { simulateResponse } from './simulate.js';
 import { showFigure } from '../figure.js';
 import { uid, snapGrid, snapPoint } from './model.js';
+import { createViewport } from '../zoom.js';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, attrs, text) => {
@@ -26,6 +27,8 @@ const el = (tag, attrs, text) => {
   if (text != null) n.textContent = text;
   return n;
 };
+
+const VP = createViewport();
 
 /* ---------------- 节点几何 ---------------- */
 
@@ -162,7 +165,10 @@ function wirePolyline(w, fromBlock, toBlock) {
 const SG = {
   model: null,        // { blocks: [...], wires: [...] }
   sel: null,          // { kind: 'block'|'wire', id }
-  drag: null,         // { id, dx, dy }
+  drag: null,         // { id, ids, dx, dy, startX, startY, startWX, startWY, lastDx, lastDy }
+  selSet: [],         // 框选/整体移动时的多选集合（block id）
+  dragging: null,     // 'marquee' 表示正在框选
+  marquee: null,      // { x0, y0, x1, y1, wireId }
   pending: null,      // { fromBlock, fromPort, bends: [] }
   cursor: null,
   snap: null,         // 连线中吸附到的目标端口 { block, portIdx, x, y }
@@ -483,14 +489,19 @@ function renderWire(w) {
 /* ---------------- 画布交互 ---------------- */
 
 function toSvgSG(e) {
-  const svg = $('#circ-canvas');
-  const r = svg.getBoundingClientRect();
-  return { x: e.clientX - r.left, y: e.clientY - r.top };
+  return VP.toWorld(e);
 }
 
 function bindSignalCanvas() {
   const svg = $('#circ-canvas');
   if (!svg) return;
+  VP.setSvg(svg);
+  VP.init();
+  svg.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    VP.zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 1 / 1.1);
+  }, { passive: false });
+  window.addEventListener('resize', () => VP.onResize());
 
   svg.addEventListener('pointerdown', (e) => {
     if (!SG.model) return;
@@ -538,12 +549,14 @@ function bindSignalCanvas() {
       if (!b) return;
       SG.sel = { kind: 'block', id: b.id };
       const pt = toSvgSG(e);
+      const ids = (SG.selSet && SG.selSet.includes(b.id) && SG.selSet.length > 1)
+        ? SG.selSet : [b.id];
+      SG.selSet = ids;
       SG.drag = {
-        id: b.id,
-        dx: pt.x - b.x,
-        dy: pt.y - b.y,
-        startX: e.clientX,
-        startY: e.clientY,
+        id: b.id, ids,
+        dx: pt.x - b.x, dy: pt.y - b.y,
+        startX: e.clientX, startY: e.clientY,
+        startWX: pt.x, startWY: pt.y, lastDx: 0, lastDy: 0,
         moved: false,
       };
       updateSignalSelection();
@@ -551,21 +564,13 @@ function bindSignalCanvas() {
       return;
     }
 
-    // 点击 wire
+    // 空白处或信号线上按下：起一个框选（拖拽=矩形框选，单击=选中/取消）
     const wireEl = e.target.closest('[data-wire]');
-    if (wireEl) {
-      SG.sel = { kind: 'wire', id: wireEl.dataset.wire };
-      SG.drag = null;
-      updateSignalSelection();
-      renderSignalProps();
-      return;
-    }
-
-    // 空白处
-    SG.sel = null;
-    SG.drag = null;
-    updateSignalSelection();
-    renderSignalProps();
+    SG.marquee = {
+      x0: downPt.x, y0: downPt.y, x1: downPt.x, y1: downPt.y,
+      wireId: wireEl ? wireEl.dataset.wire : null,
+    };
+    SG.dragging = 'marquee';
   });
 
   svg.addEventListener('contextmenu', (e) => {
@@ -590,12 +595,29 @@ function bindSignalCanvas() {
         if (dx * dx + dy * dy < 9) return;
         SG.drag.moved = true;
       }
-      const b = SG.model.blocks.find((b) => b.id === SG.drag.id);
-      if (!b) return;
       const pt = toSvgSG(e);
-      b.x = snapGrid(pt.x - SG.drag.dx);
-      b.y = snapGrid(pt.y - SG.drag.dy);
-      renderSignalGraph();
+      if (SG.drag.ids && SG.drag.ids.length > 1) {
+        const sdx = snapGrid(pt.x - SG.drag.startWX);
+        const sdy = snapGrid(pt.y - SG.drag.startWY);
+        const ddx = sdx - SG.drag.lastDx, ddy = sdy - SG.drag.lastDy;
+        if (ddx || ddy) {
+          moveBlocks(SG.drag.ids, ddx, ddy);
+          SG.drag.lastDx = sdx; SG.drag.lastDy = sdy;
+          renderSignalGraph();
+        }
+      } else {
+        const b = SG.model.blocks.find((x) => x.id === SG.drag.id);
+        if (!b) return;
+        b.x = snapGrid(pt.x - SG.drag.dx);
+        b.y = snapGrid(pt.y - SG.drag.dy);
+        renderSignalGraph();
+      }
+      return;
+    }
+    if (SG.dragging === 'marquee') {
+      const p = toSvgSG(e);
+      SG.marquee.x1 = p.x; SG.marquee.y1 = p.y;
+      drawMarqueeSG(SG.marquee);
       return;
     }
     // 连线中：端口吸附 + 正交预览线
@@ -635,6 +657,24 @@ function bindSignalCanvas() {
       renderSignalProps();
       return;
     }
+    if (SG.dragging === 'marquee') {
+      const m = SG.marquee;
+      const moved = Math.abs(m.x1 - m.x0) > 3 || Math.abs(m.y1 - m.y0) > 3;
+      if (!moved) {
+        if (m.wireId) SG.sel = { kind: 'wire', id: m.wireId };
+        else { SG.sel = null; SG.selSet = []; }
+      } else {
+        SG.selSet = blocksInRect(m);
+        SG.sel = SG.selSet.length ? { kind: 'block', id: SG.selSet[SG.selSet.length - 1] } : null;
+      }
+      SG.marquee = null;
+      SG.dragging = null;
+      const layer = $('#signal-temp-layer');
+      if (layer) layer.innerHTML = '';
+      updateSignalSelection();
+      renderSignalProps();
+      return;
+    }
     // 拖线松手：落在其他节点的引脚上即完成连线（Proteus 式拖拽连线）
     if (SG.pending) {
       const hit = portHitAt(toSvgSG(e));
@@ -650,11 +690,50 @@ function updateSignalSelection() {
   if (!svg) return;
   svg.querySelectorAll('.sg-block.selected, .sg-wire.selected')
     .forEach((node) => node.classList.remove('selected'));
-  if (!SG.sel) return;
-  const attribute = SG.sel.kind === 'block' ? 'data-block' : 'data-wire';
-  [...svg.querySelectorAll(`[${attribute}]`)]
-    .find((node) => node.getAttribute(attribute) === SG.sel.id)
-    ?.classList.add('selected');
+  (SG.selSet || []).forEach((id) => {
+    svg.querySelector(`[data-block="${id}"]`)?.classList.add('selected');
+  });
+  if (SG.sel && SG.sel.kind === 'wire') {
+    svg.querySelector(`[data-wire="${SG.sel.id}"]`)?.classList.add('selected');
+  }
+}
+
+/* ---------------- 框选与整体移动 ---------------- */
+
+function blocksInRect(m) {
+  const x0 = Math.min(m.x0, m.x1), x1 = Math.max(m.x0, m.x1);
+  const y0 = Math.min(m.y0, m.y1), y1 = Math.max(m.y0, m.y1);
+  return SG.model.blocks
+    .filter((b) => {
+      const bb = blockBBox(b);
+      return bb.x < x1 && bb.x + bb.w > x0 && bb.y < y1 && bb.y + bb.h > y0;
+    })
+    .map((b) => b.id);
+}
+
+function drawMarqueeSG(m) {
+  const layer = $('#signal-temp-layer');
+  if (!layer) return;
+  layer.innerHTML = '';
+  const x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1);
+  const w = Math.abs(m.x1 - m.x0), h = Math.abs(m.y1 - m.y0);
+  layer.appendChild(el('rect', {
+    x, y, width: w, height: h,
+    fill: 'rgba(0,114,189,0.08)', stroke: '#0072bd', 'stroke-width': 1, 'stroke-dasharray': '4 3',
+  }));
+}
+
+// 整体移动一组节点，并同步平移相连信号线的绝对拐点（via）
+function moveBlocks(ids, ddx, ddy) {
+  const idset = new Set(ids);
+  ids.forEach((id) => {
+    const b = SG.model.blocks.find((x) => x.id === id);
+    if (b) { b.x += ddx; b.y += ddy; }
+  });
+  SG.model.wires.forEach((w) => {
+    if (!idset.has(w.from.block) && !idset.has(w.to.block)) return;
+    if (w.via) w.via.forEach((v) => { v.x += ddx; v.y += ddy; });
+  });
 }
 
 /* ---------------- 右键菜单 ---------------- */

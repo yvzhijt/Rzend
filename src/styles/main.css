@@ -140,6 +140,24 @@ select:focus-visible {
 .menu-item.checked::after { content: "✓"; margin-left: auto; padding-left: 16px; color: var(--text); }
 .menu-sep { height: 1px; background: var(--border-light); margin: 4px 6px; }
 
+/* 字体子菜单：悬停展开（不影响两个仿真窗口） */
+.menu-item.has-submenu { position: relative; }
+.menu-item.has-submenu > .menu-dropdown {
+  display: none;
+  left: 100%;
+  top: -4px;
+  min-width: 220px;
+  padding: 10px;
+}
+.menu-item.has-submenu:hover > .menu-dropdown { display: block; }
+.font-arrow { margin-left: auto; color: var(--text-dim); font-size: 12px; }
+.font-submenu-body { display: flex; flex-direction: column; gap: 10px; }
+.font-row { display: flex; justify-content: space-between; align-items: center; font-size: 13.2px; color: var(--text-dim); }
+.font-row strong { color: var(--text); font-weight: 600; }
+.font-presets { display: flex; flex-direction: column; gap: 2px; }
+.font-presets .menu-item { font-size: 13.2px; padding: 5px 10px; }
+#font-range { width: 100%; accent-color: var(--accent); }
+
 .ribbon-right { margin-left: auto; display: flex; align-items: center; padding-right: 8px; }
 .ribbon-title {
   font-weight: 600;

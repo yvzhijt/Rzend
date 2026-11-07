@@ -1,8 +1,9 @@
 // 电路仿真画布：接线、画布交互、键盘快捷键
 import { C, el, status, callCloseCircuit } from './ui.js';
+import { createViewport } from '../zoom.js';
 import {
   GRID_OFFSET, snapGrid, snapPoint,
-  normalizeRot, pinPos, uid,
+  normalizeRot, pinPos, uid, W, H,
 } from './model.js';
 import {
   componentById, pinAt, portPos, closestOnSeg,
@@ -12,6 +13,8 @@ import { pausePower, showElementMenu, hideElementMenu } from './power.js';
 import {
   render, renderElements, renderNets, paintPorts,
 } from './render.js';
+
+const VP = createViewport();
 
 /* ---------------- 接线 ---------------- */
 
@@ -174,17 +177,62 @@ export function removeComponentFromNets(id) {
   C.model.nets = C.model.nets.filter((n) => n.ports.length || n.segs.length);
 }
 
+/* ---------------- 框选与整体移动 ---------------- */
+
+function componentsInRect(m) {
+  const x0 = Math.min(m.x0, m.x1), x1 = Math.max(m.x0, m.x1);
+  const y0 = Math.min(m.y0, m.y1), y1 = Math.max(m.y0, m.y1);
+  return C.model.components
+    .filter((c) => c.x < x1 && c.x + W > x0 && c.y < y1 && c.y + H > y0)
+    .map((c) => c.id);
+}
+
+function drawMarquee(m) {
+  const layer = document.querySelector('#circ-temp-layer');
+  if (!layer) return;
+  layer.innerHTML = '';
+  const x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1);
+  const w = Math.abs(m.x1 - m.x0), h = Math.abs(m.y1 - m.y0);
+  layer.appendChild(el('rect', {
+    x, y, width: w, height: h,
+    fill: 'rgba(0,114,189,0.08)', stroke: '#0072bd', 'stroke-width': 1, 'stroke-dasharray': '4 3',
+  }));
+}
+
+// 整体移动一组元件，并同步平移其相连网络的绝对几何（结点/拐点/自由端点）
+function moveSelection(ids, ddx, ddy) {
+  const idset = new Set(ids);
+  ids.forEach((id) => {
+    const c = componentById(id);
+    if (c) { c.x += ddx; c.y += ddy; }
+  });
+  C.model.nets.forEach((net) => {
+    if (!net.ports.some((p) => idset.has(p.split(':')[0]))) return;
+    net.junctions.forEach((j) => { j.x += ddx; j.y += ddy; });
+    net.segs.forEach((seg) => {
+      if (seg.via) seg.via.forEach((v) => { v.x += ddx; v.y += ddy; });
+      if (seg.a && seg.a.x != null) { seg.a.x += ddx; seg.a.y += ddy; }
+      if (seg.b && seg.b.x != null) { seg.b.x += ddx; seg.b.y += ddy; }
+    });
+  });
+}
+
 /* ---------------- 画布交互 ---------------- */
 
 function toSvg(e) {
-  const svg = document.querySelector('#circ-canvas');
-  const r = svg.getBoundingClientRect();
-  return { x: e.clientX - r.left, y: e.clientY - r.top };
+  return VP.toWorld(e);
 }
 
 export function bindCanvas() {
   const svg = document.querySelector('#circ-canvas');
   if (!svg) return;
+  VP.setSvg(svg);
+  VP.init();
+  svg.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    VP.zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 1 / 1.1);
+  }, { passive: false });
+  window.addEventListener('resize', () => VP.onResize());
 
   svg.addEventListener('pointerdown', (e) => {
     if (!C.model) return;
@@ -226,20 +274,25 @@ export function bindCanvas() {
       if (!target) return;
       pausePower();
       C.sel = { kind: 'el', id: target.id };
-      C.drag = { id: target.id, dx: pt.x - target.x, dy: pt.y - target.y };
+      const ids = (C.selSet && C.selSet.includes(target.id) && C.selSet.length > 1)
+        ? C.selSet : [target.id];
+      C.selSet = ids;
+      C.drag = {
+        id: target.id, ids,
+        dx: pt.x - target.x, dy: pt.y - target.y,
+        startX: pt.x, startY: pt.y, lastDx: 0, lastDy: 0,
+      };
       render();
       return;
     }
 
+    // 空白处或导线上按下：起一个框选（拖拽=矩形框选，单击=选中/取消）
     const wire = e.target.closest('[data-net]');
-    if (wire) {
-      C.sel = { kind: 'net', id: wire.dataset.net };
-      render();
-      return;
-    }
-
-    C.sel = null;
-    render();
+    C.marquee = {
+      x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y,
+      wireId: wire ? wire.dataset.net : null,
+    };
+    C.dragging = 'marquee';
   });
 
   // 右键：元件旋转 90°；空白处取消连线
@@ -263,18 +316,34 @@ export function bindCanvas() {
   window.addEventListener('pointermove', (e) => {
     if (!C.model || !C.visible) return;
     if (C.drag) {
-      const target = componentById(C.drag.id);
-      if (!target) return;
       const p = toSvg(e);
-      // 拖拽实时吸附格点：引脚随元件原点一起落在网格上
-      const nx = Math.max(GRID_OFFSET, snapGrid(p.x - C.drag.dx));
-      const ny = Math.max(GRID_OFFSET, snapGrid(p.y - C.drag.dy));
-      if (nx !== target.x || ny !== target.y) {
-        target.x = nx;
-        target.y = ny;
-        renderElements();
-        renderNets();
+      if (C.drag.ids && C.drag.ids.length > 1) {
+        const sdx = snapGrid(p.x - C.drag.startX);
+        const sdy = snapGrid(p.y - C.drag.startY);
+        const ddx = sdx - C.drag.lastDx, ddy = sdy - C.drag.lastDy;
+        if (ddx || ddy) {
+          moveSelection(C.drag.ids, ddx, ddy);
+          C.drag.lastDx = sdx; C.drag.lastDy = sdy;
+          renderElements();
+          renderNets();
+        }
+      } else {
+        const target = componentById(C.drag.id);
+        if (!target) return;
+        const nx = Math.max(GRID_OFFSET, snapGrid(p.x - C.drag.dx));
+        const ny = Math.max(GRID_OFFSET, snapGrid(p.y - C.drag.dy));
+        if (nx !== target.x || ny !== target.y) {
+          target.x = nx; target.y = ny;
+          renderElements(); renderNets();
+        }
       }
+      return;
+    }
+    if (C.dragging === 'marquee') {
+      const p = toSvg(e);
+      C.marquee.x1 = p.x; C.marquee.y1 = p.y;
+      drawMarquee(C.marquee);
+      return;
     } else if (C.pending) {
       const raw = toSvg(e);
       const near = pinAt(raw, C.pending.port);
@@ -294,7 +363,24 @@ export function bindCanvas() {
   });
 
   window.addEventListener('pointerup', () => {
-    if (C.drag) C.drag = null;
+    if (C.drag) { C.drag = null; return; }
+    if (C.dragging === 'marquee') {
+      const m = C.marquee;
+      const moved = Math.abs(m.x1 - m.x0) > 3 || Math.abs(m.y1 - m.y0) > 3;
+      if (!moved) {
+        if (m.wireId) C.sel = { kind: 'net', id: m.wireId };
+        else { C.sel = null; C.selSet = []; }
+      } else {
+        C.selSet = componentsInRect(m);
+        C.sel = C.selSet.length ? { kind: 'el', id: C.selSet[C.selSet.length - 1] } : null;
+      }
+      C.marquee = null;
+      C.dragging = null;
+      const layer = document.querySelector('#circ-temp-layer');
+      if (layer) layer.innerHTML = '';
+      render();
+      return;
+    }
   });
 }
 

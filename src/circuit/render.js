@@ -22,7 +22,8 @@ export function renderElements() {
 }
 
 export function elementNode(c) {
-  const selected = C.sel?.kind === 'el' && C.sel.id === c.id;
+  const selected = (C.sel?.kind === 'el' && C.sel.id === c.id)
+    || (C.selSet && C.selSet.includes(c.id));
   const g = el('g', { class: 'circ-el', 'data-element': c.id, transform: `translate(${c.x},${c.y})` });
 
   // 符号与端子一起旋转，文字标签保持水平
@@ -91,8 +92,7 @@ export function paintPorts() {
   });
 }
 
-// 数字逻辑门符号：D 形=与/与非，盾形=或/或非，盾形+输入弧=异或/同或，
-// 三角=非，输出端小圆圈表示取反。
+// 数字逻辑门符号：矩形=与，盾形=或，盾形+输入弧=异或，三角=非。
 export function gateSymbolParts(type, color, line, txt) {
   const y = H / 2;
   const parts = [];
@@ -114,7 +114,7 @@ export function gateSymbolParts(type, color, line, txt) {
     return parts;
   }
 
-  const rectGate = type === 'AND' || type === 'NAND';
+  const rectGate = type === 'AND';
   parts.push(line(0, 12, 38, 12), line(0, 36, 38, 36));
 
   if (rectGate) {
@@ -123,20 +123,15 @@ export function gateSymbolParts(type, color, line, txt) {
   } else {
     // 盾形门体；异或类再多一条输入弧
     parts.push(el('path', { d: 'M38 8 Q58 24 38 40 Q62 40 78 24 Q62 8 38 8 Z', ...stroke }));
-    if (type === 'XOR' || type === 'XNOR') {
+    if (type === 'XOR') {
       parts.push(el('path', { d: 'M32 8 Q52 24 32 40', fill: 'none', stroke: color, 'stroke-width': 2 }));
     }
     txt(56, '≥1');
   }
 
   const outX = rectGate ? 71 : 78;
-  if (inverted) bubble(outX);
-  parts.push(line(inverted ? outX + 6 : outX, y, W, y));
+  parts.push(line(outX, y, W, y));
   return parts;
-}
-
-function inverted(type) {
-  return type === 'NAND' || type === 'NOR' || type === 'XNOR' || type === 'NOT';
 }
 
 export function symbolParts(c) {
@@ -155,11 +150,10 @@ export function symbolParts(c) {
   switch (c.type) {
     case 'R': {
       parts.push(line(0, y, 36, y));
-      parts.push(el('polyline', {
-        points: '36,24 42,12 50,36 58,12 66,36 74,12 80,24',
-        fill: 'none', stroke: color, 'stroke-width': 2,
+      parts.push(el('rect', {
+        x: 36, y: y - 11, width: 48, height: 22, fill: 'none', stroke: color, 'stroke-width': 2,
       }));
-      parts.push(line(80, y, W, y));
+      parts.push(line(84, y, W, y));
       break;
     }
     case 'IMP':
@@ -253,8 +247,8 @@ export function symbolParts(c) {
       break;
     }
     case 'GND': {
-      parts.push(line(60, H, 60, 32));
-      parts.push(line(46, 32, 74, 32), line(51, 27, 69, 27), line(56, 22, 64, 22));
+      parts.push(line(60, 0, 60, 16));
+      parts.push(line(46, 16, 74, 16), line(51, 21, 69, 21), line(56, 26, 64, 26));
       break;
     }
     default:

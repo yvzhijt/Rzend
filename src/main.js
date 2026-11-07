@@ -1,5 +1,6 @@
 // 主界面入口：串联所有模块
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { state, $, $$, print } from './common.js';
 import { MAIN_DOCKS, bindPanelDrag, restorePanelOrder } from './panels.js';
 import {
@@ -19,6 +20,7 @@ import {
 
 function bindRibbon() {
   bindMenus();
+  bindFontMenu();
 
   $('#mi-open-folder')?.addEventListener('click', openFolderDialog);
   $('#mi-save')?.addEventListener('click', saveFile);
@@ -84,6 +86,48 @@ function bindMenus() {
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') closeAll();
   });
+}
+
+function bindFontMenu() {
+  const BASE = 15.6;          // 主页面基准字号（body 的 font-size）
+  const MIN = -10, MAX = 10;  // 允许在默认值上下 10
+  const KEY = 'rzend-main-font-delta';
+  const range = $('#font-range');
+  const valueEl = $('#font-value');
+  const presets = $$('#font-submenu-body [data-font]');
+  const fmt = (d) => (d === 0 ? '默认' : (d > 0 ? `+${d}` : `${d}`));
+
+  // WebView 原生缩放（浏览器级 zoom）：布局按比例正确回流，文字清晰，
+  // 且只作用于主窗口这一个 webview，电路/信号仿真窗口不受影响。
+  // 滑块拖动会高频触发，用 rAF 合并到每帧最多一次 IPC。
+  let zoomRaf = 0;
+  const setZoom = (factor) => {
+    if (zoomRaf) cancelAnimationFrame(zoomRaf);
+    zoomRaf = requestAnimationFrame(() => {
+      zoomRaf = 0;
+      getCurrentWebview().setZoom(factor)
+        .catch((e) => console.warn('设置界面缩放失败:', e));
+    });
+  };
+
+  const apply = (delta) => {
+    delta = Math.max(MIN, Math.min(MAX, Math.round(delta)));
+    setZoom((BASE + delta) / BASE);
+    if (valueEl) valueEl.textContent = fmt(delta);
+    if (range) range.value = String(delta);
+    presets.forEach((b) => b.classList.toggle('checked', Number(b.dataset.font) === delta));
+    try { localStorage.setItem(KEY, String(delta)); } catch (_) {}
+  };
+
+  if (range) range.addEventListener('input', () => apply(Number(range.value)));
+  presets.forEach((b) => b.addEventListener('click', () => apply(Number(b.dataset.font))));
+
+  // 子菜单内部点击不冒泡到 document，避免触发全局 closeAll 误关菜单
+  $('#font-submenu-body')?.addEventListener('click', (e) => e.stopPropagation());
+
+  let saved = 0;
+  try { saved = Number(localStorage.getItem(KEY)) || 0; } catch (_) {}
+  apply(saved);
 }
 
 function toggleDockPanel(selector) {
