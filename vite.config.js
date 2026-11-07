@@ -8,6 +8,7 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, "index.html"),
         ckt: resolve(__dirname, "ckt.html"),
+        sig: resolve(__dirname, "sig.html"),
       },
     },
   },

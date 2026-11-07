@@ -1,6 +1,7 @@
 /* 内嵌终端（ConPTY + xterm.js）
  *
  * - 输入 cmd 唤出；Ctrl+` 切换显隐；✕ 按钮隐藏（保留会话）
+ * - 输入 exit（或进程意外结束）：自动收起终端并回收会话，下次 cmd 重新创建
  * - shell：Windows PowerShell 5.1（默认）/ PowerShell 7（cmd pwsh 切换）
  * - cwd 双向同步：
  *   终端 → 应用：提示符里嵌了 OSC 7（file:/// 当前目录），这里解析后回调给 main.js
@@ -12,6 +13,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { invoke, Channel } from '@tauri-apps/api/core';
+import { $ } from './common.js';
 
 const SHELL_STORAGE_KEY = 'rzend.terminal.shell';
 // 'powershell' = Windows PowerShell 5.1，'pwsh' = PowerShell 7
@@ -22,6 +24,7 @@ let fitAddon = null;
 let started = false;      // 已成功 spawn 过
 let dead = false;         // 进程已退出，下次唤出时重建
 let spawnPromise = null;
+let closing = false;    // 正在主动销毁会话（此期间的 exit 不提示）
 let resizeObserver = null;
 let lastCols = 0;
 let lastRows = 0;
@@ -33,8 +36,6 @@ let escapeDepth = 0;
 
 let onTerminalCwd = null;   // (cwd: string) => void   终端 cwd 变化（OSC 7）
 let onTerminalNotice = null; // (msg: string) => void   给 命令行 区的提示
-
-const $ = (s) => document.querySelector(s);
 
 export function setOnTerminalCwd(fn) { onTerminalCwd = fn; }
 export function setOnTerminalNotice(fn) { onTerminalNotice = fn; }
@@ -79,12 +80,6 @@ export function setTerminalCwdChip(path) {
   if (chip) chip.textContent = path || '';
 }
 
-/** 分割条的显隐跟随终端面板 */
-function syncSplitTerminalVisibility() {
-  const panel = $('#terminal-panel');
-  $('#split-terminal')?.classList.toggle('hidden', !panel || panel.classList.contains('hidden'));
-}
-
 /** 切换显隐；show=true 时确保已 spawn 并聚焦；shell 指定 shell 类型（与已有会话不同则重建） */
 export async function toggleTerminal(forceShow, shell) {
   const panel = $('#terminal-panel');
@@ -93,12 +88,10 @@ export async function toggleTerminal(forceShow, shell) {
   if (show) {
     const want = normalizeShell(shell);
     panel.classList.remove('hidden');
-    syncSplitTerminalVisibility();
     try {
       await ensureSpawned(want);
     } catch (e) {
       panel.classList.add('hidden');
-      syncSplitTerminalVisibility();
       notify(`终端启动失败: ${e?.message ?? e}`);
       return;
     }
@@ -106,13 +99,11 @@ export async function toggleTerminal(forceShow, shell) {
     term?.focus();
   } else {
     panel.classList.add('hidden');
-    syncSplitTerminalVisibility();
   }
 }
 
 export function hideTerminal() {
   $('#terminal-panel')?.classList.add('hidden');
-  syncSplitTerminalVisibility();
 }
 
 /** 应用 → 终端：注入一行命令（会话未启动时静默跳过；输入非空时提示不注入） */
@@ -170,7 +161,7 @@ async function createTerm(shellArg) {
 
   term = new Terminal({
     fontFamily: 'Cascadia Mono, Consolas, "Courier New", monospace',
-    fontSize: 13,
+    fontSize: 15.6,
     lineHeight: 1.2,
     cursorBlink: true,
     theme: { background: '#0c0c0c', foreground: '#e6e6e6', cursor: '#f2f2f2', selectionBackground: '#3a5a7a' },
@@ -212,21 +203,35 @@ async function createTerm(shellArg) {
 }
 
 async function destroyTerm() {
-  resizeObserver?.disconnect();
-  resizeObserver = null;
-  try { await invoke('pty_kill'); } catch { /* 进程可能已退出 */ }
-  term?.dispose();
-  term = null;
-  fitAddon = null;
-  started = false;
-  dead = false;
-  currentShell = null;
+  closing = true;
+  try {
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    try { await invoke('pty_kill'); } catch { /* 进程可能已退出 */ }
+    term?.dispose();
+    term = null;
+    fitAddon = null;
+    started = false;
+    dead = false;
+    currentShell = null;
+  } finally {
+    closing = false;
+  }
+}
+
+/** PTY 进程退出（用户输入 exit 或 shell 意外结束）：收起终端并回收会话 */
+function handlePtyExit() {
+  if (closing || !started) return; // 主动销毁/切换 shell 时的正常 EOF，不提示
+  dead = true;
+  inputBuffer = '';
+  $('#terminal-panel')?.classList.add('hidden');
+  notify('终端进程已退出，输入 cmd 重新打开');
+  destroyTerm().catch(() => { /* 回收失败不影响界面 */ });
 }
 
 function handlePtyMessage(msg) {
   if (msg === 'exit') {
-    dead = true;
-    term?.write('\r\n\x1b[90m[进程已退出] 输入 cmd 重新打开终端\x1b[0m\r\n');
+    handlePtyExit();
     return;
   }
   if (typeof msg === 'string' && msg.startsWith('d:')) {

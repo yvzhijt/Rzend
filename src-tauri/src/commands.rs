@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -341,10 +342,17 @@ pub async fn open_file_dialog(
 ) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
     let ext = ext.unwrap_or_else(|| "ckt".to_string());
+    let label = if ext.eq_ignore_ascii_case("sig") {
+        "信号流图文件"
+    } else if ext.eq_ignore_ascii_case("yt") {
+        "YT 脚本文件"
+    } else {
+        "电路仿真文件"
+    };
     Ok(app
         .dialog()
         .file()
-        .add_filter("电路仿真文件", &[ext.as_str()])
+        .add_filter(label, &[ext.as_str()])
         .blocking_pick_file()
         .map(|p| p.to_string())
         .unwrap_or_default())
@@ -394,6 +402,50 @@ pub fn close_circuit_window(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
+/// 打开（或聚焦）信号系统窗口；path 非空时让窗口载入该 .sig
+#[tauri::command]
+pub async fn open_signal_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    use tauri::{Emitter, Manager};
+    {
+        let mut pending = lock(&state.inner().signal_pending);
+        *pending = path.clone();
+    }
+    if let Some(existing) = app.get_webview_window("signal") {
+        existing.set_focus().map_err(|e| e.to_string())?;
+        if let Some(p) = path {
+            app.emit("rzend:open-sig", p).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(&app, "signal", tauri::WebviewUrl::App("sig.html".into()))
+        .title("Rzend 信号系统仿真")
+        .inner_size(1180.0, 760.0)
+        .min_inner_size(880.0, 560.0)
+        .build()
+        .map_err(|e| format!("无法创建信号系统窗口: {}", e))?;
+    Ok(())
+}
+
+/// 取出并清空挂起的 .sig 路径（信号窗口启动时调用）
+#[tauri::command]
+pub fn take_signal_pending(state: tauri::State<'_, AppState>) -> Option<String> {
+    lock(&state.inner().signal_pending).take()
+}
+
+/// 关闭信号系统窗口
+#[tauri::command]
+pub fn close_signal_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    match app.get_webview_window("signal") {
+        Some(window) => window.close().map_err(|e| e.to_string()),
+        None => Ok(()),
+    }
+}
+
 /// 另存为对话框：返回用户选择的完整路径，取消时返回空字符串
 #[tauri::command]
 pub async fn save_file_dialog(
@@ -405,6 +457,8 @@ pub async fn save_file_dialog(
     let ext = ext.unwrap_or_else(|| "ckt".to_string());
     let label = if ext.eq_ignore_ascii_case("png") {
         "PNG 图片"
+    } else if ext.eq_ignore_ascii_case("sig") {
+        "信号流图文件"
     } else {
         "电路仿真文件"
     };
@@ -431,7 +485,11 @@ pub fn shell_pwd(state: tauri::State<'_, AppState>) -> String {
 }
 
 #[tauri::command]
-pub fn shell_cd(state: tauri::State<'_, AppState>, path: String) -> Result<String, String> {
+pub fn shell_cd(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    _force: Option<bool>,
+) -> Result<String, String> {
     let cwd = state.inner().cwd.clone();
     let target = {
         let cur = lock(&cwd);
@@ -503,6 +561,126 @@ pub async fn shell_rm(state: tauri::State<'_, AppState>, name: String) -> Result
             fs::remove_file(&target).map_err(|e| format!("删除文件失败: {}", e))?;
             Ok(format!("已删除: {}", target.display()))
         }
+    })
+    .await?
+}
+
+// ---------------- shell 进程运行器 ----------------
+
+/// 启动一个子进程，通过 Tauri 事件 `shell-output` 推送 stdout/stderr。
+/// payload: { key, text, line_break, cmd }，cmd 为 "stdout_start" / "stderr_start" / "stdout_data"。
+/// 进程结束时发送 { key, text: null }。
+#[tauri::command]
+pub async fn shell_spawn(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    command: String,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    use std::process::Stdio;
+    use tauri::Emitter;
+
+    let working_dir = {
+        if let Some(c) = cwd {
+            PathBuf::from(c)
+        } else {
+            lock(&state.inner().cwd).clone()
+        }
+    };
+
+    let mut cmd = std::process::Command::new("cmd.exe");
+    cmd.args(["/C", &command])
+        .current_dir(&working_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+    let key = format!("shell_{}", std::process::id());
+
+    let app_handle = app.clone();
+    let key_clone = key.clone();
+
+    blocking(move || {
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("启动命令失败: {}", e))?;
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        // stdout 线程
+        if let Some(mut stdout) = stdout {
+            let app = app_handle.clone();
+            let key = key_clone.clone();
+            let _ = app.emit("shell-output", serde_json::json!({
+                "key": key, "text": "", "line_break": false, "cmd": "stdout_start"
+            }));
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match stdout.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let _ = app.emit("shell-output", serde_json::json!({
+                                "key": key, "text": text, "line_break": true, "cmd": "stdout_data"
+                            }));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = app.emit("shell-output", serde_json::json!({
+                    "key": key, "text": null, "line_break": false, "cmd": "exit"
+                }));
+            });
+        }
+
+        // stderr 线程
+        if let Some(mut stderr) = stderr {
+            let app = app_handle.clone();
+            let key = key_clone.clone();
+            let _ = app.emit("shell-output", serde_json::json!({
+                "key": key, "text": "", "line_break": false, "cmd": "stderr_start"
+            }));
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match stderr.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let _ = app.emit("shell-output", serde_json::json!({
+                                "key": key, "text": text, "line_break": true, "cmd": "stderr_data"
+                            }));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
+        let _ = child.wait();
+        Ok(key_clone)
+    })
+    .await?
+}
+
+// ---------------- 工作区保存 ----------------
+
+/// 将工作区变量导出为 JSON 文件
+#[tauri::command]
+pub async fn save_workspace(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<String, String> {
+    let yt = state.inner().yt.clone();
+    blocking(move || {
+        let vars = lock(&yt).workspace_vars();
+        let json = serde_json::to_string_pretty(&vars)
+            .map_err(|e| format!("序列化工作区失败: {}", e))?;
+        fs::write(&path, json)
+            .map_err(|e| format!("写入文件失败: {}", e))?;
+        Ok(format!("工作区已保存到: {}", path))
     })
     .await?
 }

@@ -10,7 +10,7 @@
 //!   （cmd 为 cd /d，PowerShell 为 Set-Location）。
 
 use base64::Engine;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +40,7 @@ impl ShellKind {
 pub struct TerminalState {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
     shell: ShellKind,
 }
 
@@ -132,6 +132,9 @@ pub fn pty_spawn(
         })?;
     drop(pair.slave);
 
+    // 用 killer 句柄代替 child：child 交给等待线程持有并阻塞 wait()
+    let killer = child.clone_killer();
+
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -144,12 +147,15 @@ pub fn pty_spawn(
     *guard = Some(TerminalState {
         master: pair.master,
         writer,
-        child,
+        killer,
         shell: kind,
     });
     drop(guard);
 
-    // 读线程：ConPTY 输出 → base64 → Channel（"d:<payload>"）；退出时发送 "exit"
+    // 退出等待用的 Channel 副本（Channel 会被读线程移走）
+    let watch_channel = channel.clone();
+
+    // 读线程：ConPTY 输出 → base64 → Channel（"d:<payload>"）
     std::thread::spawn(move || {
         let engine = base64::engine::general_purpose::STANDARD;
         let mut buf = [0u8; 8192];
@@ -165,7 +171,13 @@ pub fn pty_spawn(
                 Err(_) => break,
             }
         }
-        let _ = channel.send("exit".to_string());
+    });
+
+    // 退出等待线程：持有 child 并阻塞在 wait()（零轮询），进程退出后通知前端
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+        let _ = watch_channel.send("exit".to_string());
     });
 
     Ok(format!("spawned:{}", kind.name()))
@@ -235,7 +247,6 @@ pub fn pty_kill(state: tauri::State<'_, crate::AppState>) -> Result<(), String> 
 /// 关闭并回收终端进程（无则忽略）
 pub fn kill_existing(slot: &TerminalSlot) {
     if let Some(mut term) = lock_slot(slot).take() {
-        let _ = term.child.kill();
-        let _ = term.child.wait();
+        let _ = term.killer.kill();
     }
 }

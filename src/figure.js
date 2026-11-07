@@ -1,6 +1,8 @@
 // 浮动图窗：示波器曲线与 plot() 结果共用
 // 滚轮缩放、拖动平移、双击或「复位」回到初始视图
 
+import { $ } from './common.js';
+
 const COLORS = ['#0072bd', '#d95319', '#77ac30', '#7e2f8e', '#edb120', '#4dbeee'];
 const PAD = { l: 60, r: 24, t: 18, b: 40 };
 const CW = 560;
@@ -20,8 +22,6 @@ const F = {
   drag: null,
   headDrag: null,
 };
-
-const $ = (s) => document.querySelector(s);
 
 export function initFigure() {
   if (F.win) return;

@@ -27,6 +27,7 @@ pub struct AppState {
     pub cwd: Arc<Mutex<PathBuf>>,
     pub yt: Arc<Mutex<yt::Env>>,
     pub circuit_pending: Arc<Mutex<Option<String>>>,
+    pub signal_pending: Arc<Mutex<Option<String>>>,
     pub terminal: terminal::TerminalSlot,
 }
 
@@ -38,6 +39,7 @@ impl AppState {
             )),
             yt: Arc::new(Mutex::new(yt::Env::new())),
             circuit_pending: Arc::new(Mutex::new(None)),
+            signal_pending: Arc::new(Mutex::new(None)),
             terminal: terminal::new_slot(),
         }
     }
@@ -61,6 +63,9 @@ pub fn run() {
             commands::open_circuit_window,
             commands::take_circuit_pending,
             commands::close_circuit_window,
+            commands::open_signal_window,
+            commands::take_signal_pending,
+            commands::close_signal_window,
             commands::save_file_dialog,
             commands::get_initial_dir,
             commands::shell_pwd,
@@ -68,6 +73,8 @@ pub fn run() {
             commands::shell_ls,
             commands::shell_mkdir,
             commands::shell_rm,
+            commands::shell_spawn,
+            commands::save_workspace,
             commands::yt_eval,
             commands::yt_reset,
             commands::get_workspace,

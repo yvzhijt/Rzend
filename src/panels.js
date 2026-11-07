@@ -2,7 +2,7 @@
 
 export const MAIN_DOCKS = [
   { container: '#main-area', items: ['#folder-panel', '#workspace-panel'], axis: 'x', storage: 'rzend.dock.main' },
-  { container: '#center-area', items: ['#editor-panel', '#command-window', '#terminal-panel'], axis: 'y', storage: 'rzend.dock.center' },
+  { container: '#center-area', items: ['#editor-panel', '#bottom-stack'], axis: 'y', storage: 'rzend.dock.center' },
 ];
 
 export const CIRC_DOCKS = [

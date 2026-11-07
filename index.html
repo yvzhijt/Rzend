@@ -8,36 +8,41 @@
 </head>
 <body>
   <div id="app">
-    <!-- 顶部工具栏 -->
+    <!-- 顶部菜单栏 -->
     <div id="ribbon">
-      <div class="ribbon-section">
-        <button class="ribbon-btn" id="ribbon-open-folder" title="打开文件夹">
-          <span class="ribbon-btn-icon">📂</span><span class="ribbon-btn-text">打开</span>
-        </button>
-        <button class="ribbon-btn" id="ribbon-save" title="保存 (Ctrl+S)">
-          <span class="ribbon-btn-icon">💾</span><span class="ribbon-btn-text">保存</span>
-        </button>
-      </div>
-      <div class="ribbon-divider"></div>
-      <div class="ribbon-section">
-        <button class="ribbon-btn accent" id="ribbon-run" title="仅运行当前 .yt 文件">
-          <span class="ribbon-btn-icon">▶</span><span class="ribbon-btn-text">运行</span>
-        </button>
-      </div>
-      <div class="ribbon-divider"></div>
-      <div class="ribbon-section">
-        <button class="ribbon-btn" id="ribbon-toggle-folder" title="切换文件夹面板">
-          <span class="ribbon-btn-icon">📁</span><span class="ribbon-btn-text">文件夹</span>
-        </button>
-        <button class="ribbon-btn" id="ribbon-toggle-workspace" title="切换工作区面板">
-          <span class="ribbon-btn-icon">📦</span><span class="ribbon-btn-text">工作区</span>
-        </button>
-      </div>
-      <div class="ribbon-divider"></div>
-      <div class="ribbon-section">
-        <button class="ribbon-btn" id="ribbon-circuit" title="打开仿真画布">
-          <span class="ribbon-btn-icon">⚡</span><span class="ribbon-btn-text">仿真</span>
-        </button>
+      <div class="menu-bar">
+        <!-- 文件 -->
+        <div class="menu" id="menu-file">
+          <button class="menu-btn" type="button">文件</button>
+          <div class="menu-dropdown">
+            <button class="menu-item" id="mi-open-folder"><span>打开文件夹…</span><span class="menu-hotkey">Ctrl+O</span></button>
+            <button class="menu-item" id="mi-save"><span>保存</span><span class="menu-hotkey">Ctrl+S</span></button>
+            <div class="menu-sep"></div>
+            <button class="menu-item" id="mi-refresh">刷新文件夹</button>
+            <button class="menu-item" id="mi-folder-up">上级目录</button>
+            <div class="menu-sep"></div>
+            <button class="menu-item" id="mi-toggle-folder">文件夹面板</button>
+            <button class="menu-item" id="mi-toggle-workspace">工作区面板</button>
+          </div>
+        </div>
+        <!-- 编辑 -->
+        <div class="menu" id="menu-edit">
+          <button class="menu-btn" type="button">编辑</button>
+          <div class="menu-dropdown">
+            <button class="menu-item" id="mi-clear-cmd"><span>清空命令行</span><span class="menu-hotkey">clc</span></button>
+            <button class="menu-item" id="mi-clear-ws"><span>清空工作区</span><span class="menu-hotkey">clear</span></button>
+            <div class="menu-sep"></div>
+            <button class="menu-item" id="mi-terminal"><span>切换终端</span><span class="menu-hotkey">Ctrl+`</span></button>
+          </div>
+        </div>
+        <!-- 仿真 -->
+        <div class="menu" id="menu-sim">
+          <button class="menu-btn" type="button">仿真</button>
+          <div class="menu-dropdown">
+            <button class="menu-item" id="mi-circuit">电气系统</button>
+            <button class="menu-item" id="mi-signal">信号系统</button>
+          </div>
+        </div>
       </div>
       <div class="ribbon-right">
         <span class="ribbon-title">Rzend</span>
@@ -70,8 +75,8 @@
             <span id="editor-filename"></span>
             <span id="editor-modified" class="hidden">● 已修改</span>
             <div class="editor-toolbar-actions">
-              <button id="btn-run-file" class="toolbar-btn" title="仅运行 .yt 文件">▶ 运行</button>
               <button id="btn-save-file" class="toolbar-btn" title="保存 (Ctrl+S)">💾 保存</button>
+              <button id="btn-run-file" class="toolbar-btn" title="仅运行 .yt 文件">▶ 运行</button>
               <button id="btn-close-file" class="toolbar-btn" title="关闭">✕</button>
             </div>
           </div>
@@ -114,11 +119,14 @@
         </div>
         <div class="splitter-v" id="split-editor"></div>
 
-        <!-- 命令行窗口（主体） -->
+        <!-- 底部堆叠区：命令行与终端相互覆盖，共用同一块区域 -->
+        <div id="bottom-stack">
+        <!-- 命令行窗口 -->
         <div id="command-window">
           <div class="cmd-header">
             <span class="cmd-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>命令行窗口</span>
             <div class="cmd-actions">
+              <button class="panel-icon-btn" id="btn-terminal-switch" title="切换到终端 (cmd / 反引号)">⌨</button>
               <button class="panel-icon-btn" id="btn-clear-cmd" title="清空命令行 (clc)">🗑</button>
             </div>
           </div>
@@ -130,18 +138,19 @@
             </div>
           </div>
         </div>
-        <div class="splitter-v hidden" id="split-terminal"></div>
 
         <!-- 内嵌终端（PowerShell）：输入 cmd 唤出，cwd 与文件树双向同步 -->
         <div id="terminal-panel" class="hidden">
           <div class="cmd-header terminal-header">
             <span class="cmd-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>终端<span id="terminal-shell" class="terminal-shell"></span><span id="terminal-cwd" class="terminal-cwd"></span></span>
             <div class="cmd-actions">
+              <button class="panel-icon-btn" id="btn-cmd-switch" title="切换到命令行">&gt;_</button>
               <button class="panel-icon-btn" id="btn-terminal-close" title="隐藏终端（会话保留）">✕</button>
             </div>
           </div>
           <div id="terminal-container"></div>
         </div>
+        </div><!-- /bottom-stack -->
       </div>
 
       <div class="splitter" id="split-right"></div>

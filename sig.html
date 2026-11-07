@@ -7,16 +7,21 @@
   <link rel="stylesheet" href="/src/styles/main.css" />
 </head>
 <body>
-  <div id="signal-view">
-    <div id="sig-toolbar">
+  <div id="circuit-view">
+    <div id="circ-toolbar">
       <span class="sim-title">信号系统仿真</span>
       <div class="sim-mode-group">
-        <button class="toolbar-btn accent" id="sig-mason" title="梅森增益公式分析">🧮 梅森分析</button>
+        <button class="toolbar-btn accent" id="circ-run" title="计算传递函数并在示波器显示时域响应">▶ 仿真</button>
+        <label class="sim-field" style="margin-left:8px;font-size:12px">仿真时间
+          <input id="sig-sim-time" type="number" value="10" min="0.1" step="1"
+            style="width:60px;margin-left:4px;padding:2px 6px;border:1px solid var(--border);border-radius:var(--radius-sm)">
+          <span style="font-size:11px;color:var(--text-dim)">s</span>
+        </label>
       </div>
       <details class="sim-settings">
         <summary>⚙ 设置</summary>
         <label class="sim-field">文件格式
-          <span style="font-size:11px;color:var(--dim);margin-left:4px">信号流图 (*.sig)</span>
+          <span style="font-size:11px;color:var(--text-dim);margin-left:4px">信号流图 (*.sig)</span>
         </label>
       </details>
       <span class="sim-sep"></span>
@@ -24,41 +29,53 @@
       <button class="toolbar-btn" id="sig-save-as">💾 另存为</button>
       <button class="toolbar-btn" id="sig-open">📂 打开</button>
       <button class="toolbar-btn" id="sig-clear">清空</button>
-      <span class="sim-status" id="sig-status">就绪</span>
+      <span class="sim-status" id="circ-status">就绪</span>
       <button class="toolbar-btn sim-close" id="sig-close">✕ 关闭窗口</button>
     </div>
-    <div id="sig-body">
-      <div id="sig-palette">
+    <div id="circ-body">
+      <div id="circ-palette">
         <div class="panel-header sig-palette-header">
           <span class="panel-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>节点库</span>
         </div>
-        <input id="sig-search" class="circ-search" type="text" placeholder="搜索节点" autocomplete="off">
-        <div id="sig-palette-list"></div>
+        <input id="circ-search" class="circ-search" type="text" placeholder="搜索节点" autocomplete="off">
+        <div id="circ-palette-list"></div>
       </div>
-      <div id="sig-canvas-wrap">
-        <svg id="sig-canvas">
+      <div id="circ-canvas-wrap">
+        <svg id="circ-canvas">
           <defs>
-            <pattern id="sig-grid-pattern" width="12" height="12" patternUnits="userSpaceOnUse">
+            <pattern id="circ-grid-pattern" width="12" height="12" patternUnits="userSpaceOnUse">
               <circle cx="6" cy="6" r="1" fill="#d4d4d4" />
             </pattern>
-            <marker id="sig-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            <marker id="signal-arrow" viewBox="0 0 10 10" refX="9" refY="5"
               markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M0 0 L10 5 L0 10 Z" fill="#3976a8" />
             </marker>
           </defs>
-          <rect x="0" y="0" width="100%" height="100%" fill="url(#sig-grid-pattern)" />
-          <g id="sig-wires-layer"></g>
-          <g id="sig-temp-layer"></g>
-          <g id="sig-elements-layer"></g>
+          <rect x="0" y="0" width="100%" height="100%" fill="url(#circ-grid-pattern)" />
+          <g id="signal-wires-layer"></g>
+          <g id="signal-temp-layer"></g>
+          <g id="signal-elements-layer"></g>
         </svg>
-        <div id="sig-empty" class="circ-empty hidden">画布为空 · 在左侧搜索节点后点击添加</div>
+        <div id="circ-empty" class="circ-empty hidden">画布为空 · 在左侧搜索节点后点击添加</div>
       </div>
-      <div id="sig-props">
+      <div id="circ-props">
         <div class="panel-header"><span class="panel-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>节点属性</span></div>
-        <div id="sig-props-body"><div class="placeholder-content">选中一个节点</div></div>
+        <div id="circ-props-body"><div class="placeholder-content">选中一个节点</div></div>
       </div>
     </div>
-    <div id="sig-context-menu" class="circ-context-menu hidden" role="menu">
+
+    <div id="scope-window" class="hidden">
+      <div id="scope-head">
+        <span class="scope-title" id="scope-title">示波器</span>
+        <span id="scope-sub"></span>
+        <button id="scope-reset" title="复位视图">复位</button>
+        <button id="scope-close" title="关闭">✕</button>
+      </div>
+      <canvas id="scope-canvas"></canvas>
+      <div id="scope-legend"></div>
+    </div>
+
+    <div id="circ-context-menu" class="circ-context-menu hidden" role="menu">
       <button type="button" role="menuitem" data-action="edit-tf">编辑传递函数</button>
       <button type="button" role="menuitem" data-action="add-input">添加输入端</button>
       <button type="button" role="menuitem" data-action="remove-input">移除输入端</button>
