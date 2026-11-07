@@ -1,14 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::yt::{EvalOutput, EvalResult};
-use crate::{AppState, DirEntry, PyState, WorkspaceVar};
-
-// 临时文件序号，避免并发运行时互相覆盖
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+use crate::{AppState, DirEntry, WorkspaceVar};
+use base64::Engine;
+use image::GenericImageView;
 
 /// 锁毒化恢复：panic 已被 catch_unwind 捕获时，锁内数据仍然可用
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -36,28 +33,6 @@ pub fn resolve_path(cwd: &Path, p: &str) -> PathBuf {
     } else {
         cwd.join(path)
     }
-}
-
-fn find_mpy() -> Result<PathBuf, String> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(|p| p.to_path_buf());
-        while let Some(d) = dir {
-            candidates.push(d.join("tool").join("mpy.exe"));
-            dir = d.parent().map(|p| p.to_path_buf());
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut dir = Some(cwd);
-        while let Some(d) = dir {
-            candidates.push(d.join("tool").join("mpy.exe"));
-            dir = d.parent().map(|p| p.to_path_buf());
-        }
-    }
-    candidates
-        .into_iter()
-        .find(|p| p.exists())
-        .ok_or_else(|| "找不到 tool/mpy.exe 解释器".to_string())
 }
 
 // ---------------- 文件浏览 ----------------
@@ -95,6 +70,219 @@ pub async fn scan_directory(path: String) -> Result<Vec<DirEntry>, String> {
 #[tauri::command]
 pub async fn read_file_content(path: String) -> Result<String, String> {
     blocking(move || fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {}", e))).await?
+}
+
+#[derive(serde::Serialize)]
+pub struct ImagePreview {
+    data_url: String,
+    width: u32,
+    height: u32,
+}
+
+#[tauri::command]
+pub async fn read_image_preview(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<ImagePreview, String> {
+    let cwd = state.inner().cwd.clone();
+    blocking(move || {
+        let full = resolve_path(&lock(&cwd), &path);
+        let metadata = fs::metadata(&full)
+            .map_err(|error| format!("读取图片失败 {}: {}", full.display(), error))?;
+        if !metadata.is_file() {
+            return Err(format!("不是文件: {}", full.display()));
+        }
+        if metadata.len() > 32 * 1024 * 1024 {
+            return Err("图片文件超过 32 MiB，无法预览".to_string());
+        }
+
+        let mut reader = image::ImageReader::open(&full)
+            .map_err(|error| format!("无法打开图片 {}: {}", full.display(), error))?
+            .with_guessed_format()
+            .map_err(|error| format!("无法识别图片格式 {}: {}", full.display(), error))?;
+        let format = reader
+            .format()
+            .ok_or_else(|| format!("无法识别图片格式: {}", full.display()))?;
+        let mime = match format {
+            image::ImageFormat::Png => "image/png",
+            image::ImageFormat::Jpeg => "image/jpeg",
+            image::ImageFormat::Gif => "image/gif",
+            image::ImageFormat::WebP => "image/webp",
+            image::ImageFormat::Bmp => "image/bmp",
+            image::ImageFormat::Ico => "image/x-icon",
+            _ => return Err(format!("不支持预览此图片格式: {}", full.display())),
+        };
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(16_384);
+        limits.max_image_height = Some(16_384);
+        limits.max_alloc = Some(128 * 1024 * 1024);
+        reader.limits(limits);
+        let decoded = reader
+            .decode()
+            .map_err(|error| format!("无法解码图片 {}: {}", full.display(), error))?;
+        let (width, height) = (decoded.width(), decoded.height());
+        let bytes = fs::read(&full)
+            .map_err(|error| format!("读取图片失败 {}: {}", full.display(), error))?;
+        Ok(ImagePreview {
+            data_url: format!(
+                "data:{};base64,{}",
+                mime,
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ),
+            width,
+            height,
+        })
+    })
+    .await?
+}
+
+#[derive(Clone, serde::Deserialize)]
+pub struct ImageOperation {
+    kind: String,
+    x: Option<u32>,
+    y: Option<u32>,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+fn transform_image_sync(
+    source: &Path,
+    operations: Vec<ImageOperation>,
+    output: Option<PathBuf>,
+) -> Result<ImagePreview, String> {
+    let metadata = fs::metadata(source)
+        .map_err(|error| format!("读取图片失败 {}: {}", source.display(), error))?;
+    if !metadata.is_file() {
+        return Err(format!("不是文件: {}", source.display()));
+    }
+    if metadata.len() > 32 * 1024 * 1024 {
+        return Err("图片文件超过 32 MiB，无法编辑".to_string());
+    }
+    let mut reader = image::ImageReader::open(source)
+        .map_err(|error| format!("无法打开图片 {}: {}", source.display(), error))?
+        .with_guessed_format()
+        .map_err(|error| format!("无法识别图片格式 {}: {}", source.display(), error))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let mut image = reader
+        .decode()
+        .map_err(|error| format!("无法解码图片 {}: {}", source.display(), error))?;
+    if u64::from(image.width()) * u64::from(image.height()) > 8_388_608 {
+        return Err("图片像素数量过大，最多支持 8388608 个像素".to_string());
+    }
+
+    for operation in operations {
+        match operation.kind.as_str() {
+            "crop" => {
+                let x = operation.x.ok_or_else(|| "裁剪位置无效".to_string())?;
+                let y = operation.y.ok_or_else(|| "裁剪位置无效".to_string())?;
+                let width = operation.width.ok_or_else(|| "裁剪宽度无效".to_string())?;
+                let height = operation.height.ok_or_else(|| "裁剪高度无效".to_string())?;
+                if width == 0
+                    || height == 0
+                    || x.checked_add(width)
+                        .map_or(true, |right| right > image.width())
+                    || y.checked_add(height)
+                        .map_or(true, |bottom| bottom > image.height())
+                {
+                    return Err("裁剪区域超出图片范围".to_string());
+                }
+                image = image.crop_imm(x, y, width, height);
+            }
+            "resize" => {
+                let width = operation.width.ok_or_else(|| "缩放宽度无效".to_string())?;
+                let height = operation.height.ok_or_else(|| "缩放高度无效".to_string())?;
+                if width == 0
+                    || height == 0
+                    || width > 16_384
+                    || height > 16_384
+                    || u64::from(width) * u64::from(height) > 8_388_608
+                {
+                    return Err(
+                        "缩放尺寸无效：最多支持 16384×16384 且不超过 8388608 个像素".to_string()
+                    );
+                }
+                image = image.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+            }
+            "rotate_left" => image = image.rotate270(),
+            "rotate_right" => image = image.rotate90(),
+            "grayscale" => image = image.grayscale(),
+            "blur" => image = image.blur(2.0),
+            "sharpen" => image = image.unsharpen(1.0, 1),
+            "brighten" => image = image.brighten(30),
+            "darken" => image = image.brighten(-30),
+            "contrast" => image = image.adjust_contrast(25.0),
+            "invert" => image.invert(),
+            kind => return Err(format!("不支持的图片操作: {}", kind)),
+        }
+    }
+
+    let saving = output.is_some();
+    if let Some(output) = output {
+        let source_canonical = source
+            .canonicalize()
+            .map_err(|error| format!("无法解析源图片路径: {}", error))?;
+        let output_canonical = if output.exists() {
+            output.canonicalize()
+        } else {
+            output
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .canonicalize()
+                .map(|parent| parent.join(output.file_name().unwrap_or_default()))
+        }
+        .map_err(|error| format!("无法解析保存路径: {}", error))?;
+        if source_canonical == output_canonical {
+            return Err("另存为路径不能覆盖原图片".to_string());
+        }
+        let format = image::ImageFormat::from_path(&output)
+            .map_err(|error| format!("无法识别保存图片格式: {}", error))?;
+        image
+            .save_with_format(&output, format)
+            .map_err(|error| format!("保存图片失败 {}: {}", output.display(), error))?;
+    }
+
+    let (width, height) = image.dimensions();
+    if saving {
+        return Ok(ImagePreview {
+            data_url: String::new(),
+            width,
+            height,
+        });
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .map_err(|error| format!("生成图片预览失败: {}", error))?;
+    Ok(ImagePreview {
+        data_url: format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
+        ),
+        width,
+        height,
+    })
+}
+
+#[tauri::command]
+pub async fn transform_image(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    operations: Vec<ImageOperation>,
+    output_path: Option<String>,
+) -> Result<ImagePreview, String> {
+    let cwd = state.inner().cwd.clone();
+    blocking(move || {
+        let current_dir = lock(&cwd);
+        let source = resolve_path(&current_dir, &path);
+        let output = output_path.map(|path| resolve_path(&current_dir, &path));
+        drop(current_dir);
+        transform_image_sync(&source, operations, output)
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -145,6 +333,67 @@ pub async fn open_folder_dialog(app: tauri::AppHandle) -> Result<String, String>
     }
 }
 
+/// 打开文件对话框：返回用户选择的完整路径，取消时返回空字符串
+#[tauri::command]
+pub async fn open_file_dialog(
+    app: tauri::AppHandle,
+    ext: Option<String>,
+) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let ext = ext.unwrap_or_else(|| "ckt".to_string());
+    Ok(app
+        .dialog()
+        .file()
+        .add_filter("电路仿真文件", &[ext.as_str()])
+        .blocking_pick_file()
+        .map(|p| p.to_string())
+        .unwrap_or_default())
+}
+
+/// 打开（或聚焦）电路仿真窗口；path 非空时让窗口载入该 .ckt
+#[tauri::command]
+pub async fn open_circuit_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    use tauri::{Emitter, Manager};
+    {
+        let mut pending = lock(&state.inner().circuit_pending);
+        *pending = path.clone();
+    }
+    if let Some(existing) = app.get_webview_window("circuit") {
+        existing.set_focus().map_err(|e| e.to_string())?;
+        if let Some(p) = path {
+            app.emit("rzend:open-ckt", p).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(&app, "circuit", tauri::WebviewUrl::App("ckt.html".into()))
+        .title("Rzend仿真")
+        .inner_size(1180.0, 760.0)
+        .min_inner_size(880.0, 560.0)
+        .build()
+        .map_err(|e| format!("无法创建电路仿真窗口: {}", e))?;
+    Ok(())
+}
+
+/// 取出并清空挂起的 .ckt 路径（电路窗口启动时调用）
+#[tauri::command]
+pub fn take_circuit_pending(state: tauri::State<'_, AppState>) -> Option<String> {
+    lock(&state.inner().circuit_pending).take()
+}
+
+/// 关闭电路仿真窗口
+#[tauri::command]
+pub fn close_circuit_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    match app.get_webview_window("circuit") {
+        Some(window) => window.close().map_err(|e| e.to_string()),
+        None => Ok(()),
+    }
+}
+
 /// 另存为对话框：返回用户选择的完整路径，取消时返回空字符串
 #[tauri::command]
 pub async fn save_file_dialog(
@@ -154,10 +403,12 @@ pub async fn save_file_dialog(
 ) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
     let ext = ext.unwrap_or_else(|| "ckt".to_string());
-    let mut builder = app
-        .dialog()
-        .file()
-        .add_filter("电路仿真文件", &[ext.as_str()]);
+    let label = if ext.eq_ignore_ascii_case("png") {
+        "PNG 图片"
+    } else {
+        "电路仿真文件"
+    };
+    let mut builder = app.dialog().file().add_filter(label, &[ext.as_str()]);
     if let Some(name) = default_name {
         builder = builder.set_file_name(name);
     }
@@ -281,8 +532,11 @@ pub async fn yt_eval(
     code: String,
 ) -> Result<EvalResult, String> {
     let yt = state.inner().yt.clone();
+    let cwd = state.inner().cwd.clone();
     blocking(move || {
+        let working_dir = lock(&cwd).clone();
         let mut env = lock(&yt);
+        env.set_working_dir(working_dir);
         let (outputs, plot) = eval_block_guarded(&mut env, &code);
         EvalResult {
             outputs,
@@ -295,8 +549,10 @@ pub async fn yt_eval(
 
 #[tauri::command]
 pub fn yt_reset(state: tauri::State<'_, AppState>) -> Vec<WorkspaceVar> {
+    let cwd = lock(&state.inner().cwd).clone();
     let mut env = lock(&state.inner().yt);
     env.reset();
+    env.set_working_dir(cwd);
     env.workspace_vars()
 }
 
@@ -313,11 +569,10 @@ pub async fn run_yt_file(
     let cwd = state.inner().cwd.clone();
     let yt = state.inner().yt.clone();
     blocking(move || {
-        let full = {
-            let cur = lock(&cwd);
-            resolve_path(&cur, &path)
-        };
+        let working_dir = lock(&cwd).clone();
+        let full = resolve_path(&working_dir, &path);
         let mut env = lock(&yt);
+        env.set_working_dir(working_dir);
         match fs::read_to_string(&full) {
             Ok(code) => {
                 let (outputs, plot) = eval_block_guarded(&mut env, &code);
@@ -340,307 +595,77 @@ pub async fn run_yt_file(
     .await
 }
 
-// ---------------- .pyt / MicroPython ----------------
+#[cfg(test)]
+mod image_edit_tests {
+    use super::{transform_image_sync, ImageOperation};
+    use image::GenericImageView;
+    use image::Rgba;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-/// 转成 Python 单引号字符串字面量
-fn py_str_lit(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(ch),
-        }
-    }
-    out.push('\'');
-    out
-}
+    // 临时文件序号，避免并发运行时互相覆盖
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 生成一行引导代码，用全局队列覆盖 input()，按顺序返回用户填写的值。
-/// 之所以不走 stdin 管道：mpy.exe 在非控制台 stdin 下 input() 直接抛
-/// KeyboardInterrupt（EOF），无法交互。
-fn inject_input_header(inputs: &[String]) -> String {
-    let items = inputs
-        .iter()
-        .map(|s| py_str_lit(s))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "__rzend_q=[{}];__rzend_k=0;exec(\"def input(p=''):\\n global __rzend_k\\n n=__rzend_q[__rzend_k] if __rzend_k<len(__rzend_q) else ''\\n __rzend_k+=1\\n print(p+n)\\n return n\")\n",
-        items
-    )
-}
-
-#[tauri::command]
-pub async fn run_pyt_file(
-    state: tauri::State<'_, AppState>,
-    path: String,
-    inputs: Option<Vec<String>>,
-) -> Result<String, String> {
-    let cwd = state.inner().cwd.clone();
-    blocking(move || {
-        let full = {
-            let cur = lock(&cwd);
-            resolve_path(&cur, &path)
-        };
-        if !full.exists() {
-            return Err(format!("文件不存在: {}", full.display()));
-        }
-        let mpy = find_mpy()?;
-
-        // 有输入值（含空数组）时，把引导代码注入脚本副本后运行
-        let mut target = full.clone();
-        let mut temp: Option<PathBuf> = None;
-        if let Some(values) = inputs {
-            let code = fs::read_to_string(&full).map_err(|e| format!("读取文件失败: {}", e))?;
-            let mut content = inject_input_header(&values);
-            content.push_str(&code);
-            let stem = full
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "script".to_string());
-            let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-            let file = std::env::temp_dir().join(format!(
-                "rzend_{}_{}_{}.py",
-                stem,
-                std::process::id(),
-                seq
-            ));
-            fs::write(&file, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
-            target = file.clone();
-            temp = Some(file);
-        }
-
-        let mut cmd = Command::new(mpy);
-        cmd.arg(&target);
-        // 以脚本所在目录为工作目录，脚本内的相对路径才能正确解析
-        if let Some(dir) = full.parent() {
-            cmd.current_dir(dir);
-        }
-        let output = cmd.output();
-        if let Some(f) = temp {
-            let _ = fs::remove_file(f);
-        }
-        let output = output.map_err(|e| format!("运行 mpy.exe 失败: {}", e))?;
-        let mut text = String::new();
-        text.push_str(&String::from_utf8_lossy(&output.stdout));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.trim().is_empty() {
-            text.push_str(&stderr);
-        }
-        if text.is_empty() {
-            text.push_str("(无输出)");
-        }
-        Ok(text)
-    })
-    .await?
-}
-
-// ---------------- Python 交互（会话重放式 REPL） ----------------
-// MicroPython 的 -i 在管道输入下不输出求值结果，因此每次输入都重放整个会话，
-// 只返回新增的输出，从而保持变量状态并获得实时反馈。
-
-fn is_statement(line: &str) -> bool {
-    let t = line.trim();
-    if t.is_empty() || t.starts_with('#') {
-        return true;
-    }
-    const KEYWORDS: [&str; 25] = [
-        "import", "from", "def", "class", "for", "while", "if", "elif", "else", "try", "except",
-        "finally", "with", "return", "yield", "pass", "break", "continue", "global", "nonlocal",
-        "del", "assert", "print", "input", "exec",
-    ];
-    let first = t
-        .split(|c: char| c.is_whitespace() || c == '(' || c == ':')
-        .next()
-        .unwrap_or("");
-    if KEYWORDS.contains(&first) {
-        return true;
-    }
-    // 顶层赋值（排除 == != <= >= += 等）；零分配扫描
-    let mut prev = ' ';
-    for (i, c) in t.char_indices() {
-        if c == '=' {
-            let next = t[i + c.len_utf8()..].chars().next().unwrap_or(' ');
-            if next == '='
-                || prev == '='
-                || prev == '!'
-                || prev == '<'
-                || prev == '>'
-                || prev == '+'
-                || prev == '-'
-                || prev == '*'
-                || prev == '/'
-            {
-                prev = c;
-                continue;
-            }
-            return true;
-        }
-        prev = c;
-    }
-    false
-}
-
-fn wrap_line(line: &str) -> String {
-    if is_statement(line) {
-        line.to_string()
-    } else {
-        format!("print(repr({}))", line)
-    }
-}
-
-fn run_python_source(src: &str) -> Result<String, String> {
-    let mpy = find_mpy()?;
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!(
-        "rzend_py_session_{}_{}.py",
-        std::process::id(),
-        seq
-    ));
-    fs::write(&tmp, src).map_err(|e| format!("写入临时脚本失败: {}", e))?;
-    let output = Command::new(mpy).arg(&tmp).output();
-    let _ = fs::remove_file(&tmp);
-    let output = output.map_err(|e| format!("启动 mpy.exe 失败: {}", e))?;
-
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    let err = String::from_utf8_lossy(&output.stderr).to_string();
-    if !err.trim().is_empty() {
-        text.push_str(&err);
-    }
-    // 把临时文件路径替换成会话描述，避免暴露内部细节
-    let tmp_name = tmp.to_string_lossy().replace('\\', "/");
-    text = text.replace(&tmp_name, "<会话>");
-    text = text.replace(&tmp.to_string_lossy().to_string(), "<会话>");
-    Ok(text.replace("\r\n", "\n"))
-}
-
-fn common_prefix_len(a: &str, b: &str) -> usize {
-    let mut n = 0;
-    for (x, y) in a.chars().zip(b.chars()) {
-        if x != y {
-            break;
-        }
-        n += x.len_utf8();
-    }
-    n
-}
-
-#[tauri::command]
-pub fn py_start(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    find_mpy()?;
-    let mut st = lock(&state.inner().py);
-    *st = PyState::default();
-    st.gen += 1;
-    Ok("MicroPython 交互模式：逐行执行，多行语句以空行结束\n".to_string())
-}
-
-/// 需要在锁外运行进程时携带的上下文
-struct PyRun {
-    all: Vec<String>,
-    gen: u64,
-    prev: String,
-    clear_pending: bool,
-}
-
-#[tauri::command]
-pub async fn py_send(
-    state: tauri::State<'_, AppState>,
-    line: String,
-) -> Result<crate::PyReply, String> {
-    let py = state.inner().py.clone();
-    blocking(move || {
-        // 第一阶段：锁内整理状态，确定是否需要运行进程
-        let run: PyRun = {
-            let mut st = lock(&py);
-
-            // 多行块收集中
-            if !st.pending.is_empty() {
-                if line.trim().is_empty() {
-                    let mut all = st.lines.clone();
-                    all.extend(st.pending.iter().cloned());
-                    PyRun {
-                        all,
-                        gen: st.gen,
-                        prev: st.last_output.clone(),
-                        clear_pending: true,
-                    }
-                } else {
-                    st.pending.push(line);
-                    return Ok(crate::PyReply {
-                        output: String::new(),
-                        pending: true,
-                    });
-                }
+    #[test]
+    fn image_operations_preview_and_save_transformed_png() {
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let base =
+            std::env::temp_dir().join(format!("rzend_image_edit_{}_{}", std::process::id(), seq));
+        let source = base.with_extension("source.png");
+        let output = base.with_extension("edited.png");
+        let image = image::RgbaImage::from_fn(4, 2, |x, y| {
+            if (x + y) % 2 == 0 {
+                Rgba([255, 0, 0, 255])
             } else {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    return Ok(crate::PyReply {
-                        output: String::new(),
-                        pending: false,
-                    });
-                }
-                // 语句块开始（以冒号结尾）
-                if trimmed.ends_with(':') {
-                    st.pending.push(line);
-                    return Ok(crate::PyReply {
-                        output: String::new(),
-                        pending: true,
-                    });
-                }
-                let mut all = st.lines.clone();
-                all.push(wrap_line(&line));
-                PyRun {
-                    all,
-                    gen: st.gen,
-                    prev: st.last_output.clone(),
-                    clear_pending: false,
-                }
+                Rgba([0, 0, 255, 255])
             }
-        };
+        });
+        image.save(&source).unwrap();
 
-        // 第二阶段：锁外等待进程，避免死循环脚本卡死 py_stop
-        let src = run.all.join("\n") + "\n";
-        let out = run_python_source(&src)?;
+        let operations = vec![
+            ImageOperation {
+                kind: "crop".into(),
+                x: Some(1),
+                y: Some(0),
+                width: Some(2),
+                height: Some(1),
+            },
+            ImageOperation {
+                kind: "rotate_right".into(),
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+            },
+            ImageOperation {
+                kind: "resize".into(),
+                x: None,
+                y: None,
+                width: Some(2),
+                height: Some(4),
+            },
+            ImageOperation {
+                kind: "grayscale".into(),
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+            },
+        ];
+        let preview = transform_image_sync(&source, operations.clone(), None).unwrap();
+        let saved_preview =
+            transform_image_sync(&source, operations, Some(output.clone())).unwrap();
 
-        // 第三阶段：重新拿锁提交结果
-        let mut st = lock(&py);
-        if st.gen != run.gen {
-            // 进程运行期间会话已被 py_stop/py_start 重置，丢弃结果避免复活旧会话
-            return Ok(crate::PyReply {
-                output: out,
-                pending: false,
-            });
-        }
-        if run.clear_pending {
-            st.pending.clear();
-        }
-        let start = common_prefix_len(&run.prev, &out);
-        if out.contains("Traceback") {
-            // 出错的行不并入历史，否则后续每次重放都会再次报错
-            return Ok(crate::PyReply {
-                output: out[start..].to_string(),
-                pending: false,
-            });
-        }
-        st.lines = run.all;
-        st.last_output = out.clone();
-        Ok(crate::PyReply {
-            output: out[start..].to_string(),
-            pending: false,
-        })
-    })
-    .await?
-}
+        assert_eq!((preview.width, preview.height), (2, 4));
+        assert!(preview.data_url.starts_with("data:image/png;base64,"));
+        assert_eq!((saved_preview.width, saved_preview.height), (2, 4));
+        assert!(saved_preview.data_url.is_empty());
+        let saved = image::ImageReader::open(&output).unwrap().decode().unwrap();
+        assert_eq!(saved.dimensions(), (2, 4));
+        let pixel = saved.to_rgba8().get_pixel(0, 0).0;
+        assert_eq!(pixel[0], pixel[1]);
+        assert_eq!(pixel[1], pixel[2]);
 
-#[tauri::command]
-pub fn py_stop(state: tauri::State<'_, AppState>) -> String {
-    let mut st = lock(&state.inner().py);
-    *st = PyState::default();
-    st.gen += 1;
-    "已退出 Python 交互模式".to_string()
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+    }
 }

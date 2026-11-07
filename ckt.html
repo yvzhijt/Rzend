@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rzend仿真</title>
+  <link rel="stylesheet" href="/src/styles/main.css" />
+</head>
+<body>
+  <!-- 电路仿真窗口（独立窗口，不共享主界面 cwd 与文件树） -->
+  <div id="circuit-view">
+    <div id="circ-toolbar">
+      <span class="sim-title">Rzend仿真</span>
+      <div class="sim-view-tabs" role="tablist" aria-label="仿真视图">
+        <button class="toolbar-btn active" id="circ-view-circuit" role="tab" aria-selected="true">电路图</button>
+        <button class="toolbar-btn" id="circ-view-signal" role="tab" aria-selected="false">信号流图</button>
+      </div>
+      <div class="sim-mode-group">
+        <label class="sim-field sim-duration">时长 (s)
+          <input id="circ-duration" type="number" value="0.005" step="0.001" min="0.000001">
+        </label>
+        <button class="toolbar-btn accent" id="circ-run" title="仿真到指定时长并查看探针波形">▶ 瞬态分析</button>
+      </div>
+      <button class="toolbar-btn" id="circ-power" title="持续实时求解；编辑电路时自动暂停">▶ 实时运行</button>
+      <button class="toolbar-btn" id="circ-speed" title="实时仿真速度">×1</button>
+      <details class="sim-settings">
+        <summary>⚙ 仿真设置</summary>
+        <label class="sim-field">时间步长 (s)
+          <input id="circ-dt" type="number" value="0.000002" step="0.0000001" min="0.000000001">
+        </label>
+      </details>
+      <span class="sim-sep"></span>
+      <button class="toolbar-btn" id="circ-save">💾 保存</button>
+      <button class="toolbar-btn" id="circ-save-as">💾 另存为</button>
+      <button class="toolbar-btn" id="circ-open">📂 打开</button>
+      <button class="toolbar-btn" id="circ-clear">清空</button>
+      <span class="sim-status" id="circ-status">就绪</span>
+      <button class="toolbar-btn sim-close" id="circ-close">✕ 关闭窗口</button>
+    </div>
+    <div id="circ-body">
+      <div id="circ-palette">
+        <div class="panel-header circ-palette-header">
+          <span class="panel-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>元件库</span>
+        </div>
+        <input id="circ-search" class="circ-search" type="text" placeholder="搜索元件" autocomplete="off">
+        <div id="circ-palette-list"></div>
+      </div>
+      <div id="circ-canvas-wrap">
+        <svg id="circ-canvas">
+          <defs>
+            <pattern id="circ-grid-pattern" width="12" height="12" patternUnits="userSpaceOnUse">
+              <circle cx="6" cy="6" r="1" fill="#d4d4d4" />
+            </pattern>
+            <marker id="signal-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 Z" fill="#3976a8" />
+            </marker>
+          </defs>
+          <rect x="0" y="0" width="100%" height="100%" fill="url(#circ-grid-pattern)" />
+          <g id="circ-wires-layer"></g>
+          <g id="circ-temp-layer"></g>
+          <g id="circ-elements-layer"></g>
+          <g id="signal-wires-layer" class="hidden"></g>
+          <g id="signal-temp-layer" class="hidden"></g>
+          <g id="signal-elements-layer" class="hidden"></g>
+        </svg>
+        <div id="circ-empty" class="circ-empty hidden">画布为空 · 在左侧搜索元件后点击添加</div>
+      </div>
+      <div id="circ-props">
+        <div class="panel-header"><span class="panel-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>元件参数</span></div>
+        <div id="circ-props-body"><div class="placeholder-content">选中一个元件</div></div>
+      </div>
+    </div>
+    <div id="circ-context-menu" class="circ-context-menu hidden" role="menu">
+      <button type="button" role="menuitem" data-action="edit">编辑属性</button>
+      <button type="button" role="menuitem" data-action="rotate">旋转 90°</button>
+      <button type="button" role="menuitem" data-action="delete">删除元件</button>
+    </div>
+  </div>
+
+  <div id="scope-window" class="hidden">
+    <div id="scope-head">
+      <span class="scope-title" id="scope-title">示波器</span>
+      <span id="scope-sub"></span>
+      <button id="scope-reset" title="复位视图">复位</button>
+      <button id="scope-close" title="关闭">✕</button>
+    </div>
+    <canvas id="scope-canvas"></canvas>
+    <div id="scope-legend"></div>
+  </div>
+
+  <script type="module" src="/src/ckt.js"></script>
+</body>
+</html>

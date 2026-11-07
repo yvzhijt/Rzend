@@ -1,6 +1,7 @@
 // .yt 语言解释器：变量、矩阵、内置函数、函数声明、plot
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use num_complex::Complex64;
 
@@ -8,7 +9,8 @@ use crate::WorkspaceVar;
 
 mod math;
 use math::{
-    expression_polynomial, matrix_eigen, polynomial_roots, trim_polynomial, value_as_complex,
+    expression_polynomial, matrix_det, matrix_eigen, matrix_inverse, matrix_rank, matrix_rref,
+    polynomial_roots, trim_polynomial, value_as_complex,
 };
 
 // ---------------- 值与表达式 ----------------
@@ -36,6 +38,7 @@ pub struct UserFunc {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Num(f64),
+    Text(String),
     Var(String),
     MatLit(Vec<Vec<Expr>>),
     Neg(Box<Expr>),
@@ -86,6 +89,7 @@ pub struct EvalResult {
 enum Tok {
     Num(f64),
     Ident(String),
+    Text(String),
     Plus,
     Minus,
     Star,
@@ -103,10 +107,25 @@ enum Tok {
 }
 
 fn strip_comment(line: &str) -> &str {
-    match line.find("//") {
-        Some(i) => &line[..i],
-        None => line,
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut chars = line.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+        } else if ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+            return &line[..index];
+        }
     }
+    line
 }
 
 fn lex(line: &str) -> Result<Vec<Tok>, String> {
@@ -117,6 +136,40 @@ fn lex(line: &str) -> Result<Vec<Tok>, String> {
         let c = chars[i];
         match c {
             ' ' | '\t' | '\r' => i += 1,
+            '"' => {
+                i += 1;
+                let mut value = String::new();
+                let mut closed = false;
+                while i < chars.len() {
+                    match chars[i] {
+                        '"' => {
+                            i += 1;
+                            closed = true;
+                            break;
+                        }
+                        '\\' if i + 1 < chars.len() => {
+                            i += 1;
+                            match chars[i] {
+                                '"' => value.push('"'),
+                                '\\' => value.push('\\'),
+                                escaped => {
+                                    value.push('\\');
+                                    value.push(escaped);
+                                }
+                            }
+                            i += 1;
+                        }
+                        ch => {
+                            value.push(ch);
+                            i += 1;
+                        }
+                    }
+                }
+                if !closed {
+                    return Err("字符串缺少结束引号".to_string());
+                }
+                toks.push(Tok::Text(value));
+            }
             '0'..='9' | '.' => {
                 let start = i;
                 let mut dots = 0;
@@ -351,6 +404,7 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> Result<Expr, String> {
         match self.next() {
             Some(Tok::Num(v)) => Ok(Expr::Num(*v)),
+            Some(Tok::Text(value)) => Ok(Expr::Text(value.clone())),
             Some(Tok::Ident(name)) => {
                 if matches!(self.peek(), Some(Tok::LParen)) {
                     self.next();
@@ -428,6 +482,7 @@ pub struct Env {
     vars: HashMap<String, Value>,
     declared: HashMap<String, String>, // 函数名 -> 形参
     depth: usize,                      // 求值递归深度
+    working_dir: PathBuf,
 }
 
 impl Default for Env {
@@ -445,7 +500,12 @@ impl Env {
             vars,
             declared: HashMap::new(),
             depth: 0,
+            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
+    }
+
+    pub fn set_working_dir(&mut self, working_dir: PathBuf) {
+        self.working_dir = working_dir;
     }
 
     pub fn reset(&mut self) {
@@ -558,6 +618,7 @@ impl Env {
     fn eval_inner(&mut self, expr: &Expr) -> Result<Value, String> {
         match expr {
             Expr::Num(v) => Ok(Value::Num(*v)),
+            Expr::Text(_) => Err("字符串只能用作 readtu 的文件路径".to_string()),
             Expr::Var(name) => match self.vars.get(name).cloned() {
                 Some(value) => Ok(value),
                 None if name == "i" || name == "j" => Ok(Value::Complex(Complex64::new(0.0, 1.0))),
@@ -624,17 +685,55 @@ impl Env {
     fn eval_call(&mut self, name: &str, args: &[Expr]) -> Result<Value, String> {
         // 大写内置矩阵函数（严格大小写）
         match name {
+            "readtu" => {
+                if args.len() != 1 {
+                    return Err("函数 'readtu' 需要 1 个带引号的图片路径".to_string());
+                }
+                let Expr::Text(path) = &args[0] else {
+                    return Err("readtu 的参数必须是带引号的图片路径".to_string());
+                };
+                if path.trim().is_empty() {
+                    return Err("readtu 的图片路径不能为空".to_string());
+                }
+                let path = Path::new(path);
+                let full_path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    self.working_dir.join(path)
+                };
+                return Ok(Value::Mat(math::read_grayscale_image(&full_path)?));
+            }
+            "savetu" => {
+                if args.len() != 2 {
+                    return Err("函数 'savetu' 用法：savetu(矩阵, \"图片路径\")".to_string());
+                }
+                let matrix = self.arg_matrix(&args[..1], "savetu")?;
+                let Expr::Text(path) = &args[1] else {
+                    return Err("savetu 的第二个参数必须是带引号的图片路径".to_string());
+                };
+                if path.trim().is_empty() {
+                    return Err("savetu 的图片路径不能为空".to_string());
+                }
+                let path = Path::new(path);
+                let full_path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    self.working_dir.join(path)
+                };
+                math::save_grayscale_image(&matrix, &full_path)?;
+                return Ok(Value::Num(1.0));
+            }
             "H" => {
                 let m = self.arg_matrix(args, "H")?;
-                return Ok(Value::Num(det(&m)?));
+                return Ok(Value::Num(matrix_det(&m)?));
             }
             "N" => {
                 let m = self.arg_matrix(args, "N")?;
-                return Ok(Value::Mat(inv(&m)?));
+                return Ok(Value::Mat(matrix_inverse(&m)?));
             }
             "R" => {
                 let m = self.arg_matrix(args, "R")?;
-                return Ok(Value::Num(rank(&m) as f64));
+                return Ok(Value::Num(matrix_rank(&m)? as f64));
             }
             "T" => {
                 let m = self.arg_matrix(args, "T")?;
@@ -643,7 +742,7 @@ impl Env {
             }
             "GS" => {
                 let m = self.arg_matrix(args, "GS")?;
-                return Ok(Value::Mat(rref(m)?));
+                return Ok(Value::Mat(matrix_rref(&m)?));
             }
             "jf" => {
                 if args.len() != 3 {
@@ -1375,160 +1474,6 @@ fn mat_op(op: BinOp, x: &[Vec<f64>], y: &[Vec<f64>]) -> Result<Value, String> {
     }
 }
 
-fn det(m: &[Vec<f64>]) -> Result<f64, String> {
-    let n = m.len();
-    if n == 0 || m.iter().any(|r| r.len() != n) {
-        return Err("H() 要求方阵".to_string());
-    }
-    let mut a: Vec<Vec<f64>> = m.to_vec();
-    let mut sign = 1.0;
-    let mut result = 1.0;
-    for col in 0..n {
-        let mut piv = col;
-        for r in col + 1..n {
-            if a[r][col].abs() > a[piv][col].abs() {
-                piv = r;
-            }
-        }
-        if a[piv][col].abs() < 1e-12 {
-            return Ok(0.0);
-        }
-        if piv != col {
-            a.swap(piv, col);
-            sign = -sign;
-        }
-        let pv = a[col][col];
-        result *= pv;
-        for r in col + 1..n {
-            let factor = a[r][col] / pv;
-            for c in col..n {
-                a[r][c] -= factor * a[col][c];
-            }
-        }
-    }
-    Ok(sign * result)
-}
-
-fn inv(m: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
-    let n = m.len();
-    if n == 0 || m.iter().any(|r| r.len() != n) {
-        return Err("N() 要求方阵".to_string());
-    }
-    let mut a = m.to_vec();
-    let mut inv_m = vec![vec![0.0; n]; n];
-    for (i, row) in inv_m.iter_mut().enumerate() {
-        row[i] = 1.0;
-    }
-    for col in 0..n {
-        let mut piv = col;
-        for r in col + 1..n {
-            if a[r][col].abs() > a[piv][col].abs() {
-                piv = r;
-            }
-        }
-        if a[piv][col].abs() < 1e-12 {
-            return Err("矩阵奇异，不可逆".to_string());
-        }
-        a.swap(piv, col);
-        inv_m.swap(piv, col);
-        let pv = a[col][col];
-        for c in 0..n {
-            a[col][c] /= pv;
-            inv_m[col][c] /= pv;
-        }
-        for r in 0..n {
-            if r != col {
-                let factor = a[r][col];
-                for c in 0..n {
-                    a[r][c] -= factor * a[col][c];
-                    inv_m[r][c] -= factor * inv_m[col][c];
-                }
-            }
-        }
-    }
-    Ok(inv_m)
-}
-
-fn rank(m: &[Vec<f64>]) -> usize {
-    let mut a = m.to_vec();
-    let (rows, cols) = (a.len(), a[0].len());
-    let mut rank = 0;
-    let mut row = 0;
-    for col in 0..cols {
-        if row >= rows {
-            break;
-        }
-        let mut piv = row;
-        for r in row + 1..rows {
-            if a[r][col].abs() > a[piv][col].abs() {
-                piv = r;
-            }
-        }
-        if a[piv][col].abs() < 1e-10 {
-            continue;
-        }
-        a.swap(piv, row);
-        let pv = a[row][col];
-        for r in row + 1..rows {
-            let factor = a[r][col] / pv;
-            for c in col..cols {
-                a[r][c] -= factor * a[row][c];
-            }
-        }
-        rank += 1;
-        row += 1;
-    }
-    rank
-}
-
-fn rref(m: Vec<Vec<f64>>) -> Result<Vec<Vec<f64>>, String> {
-    let rows = m.len();
-    let cols = m.first().map_or(0, Vec::len);
-    if rows == 0 || cols == 0 || m.iter().any(|row| row.len() != cols) {
-        return Err("GS() 要求非空且每行列数一致的矩阵".to_string());
-    }
-
-    let mut out = m;
-    let mut pivot_row = 0;
-    for col in 0..cols {
-        if pivot_row == rows {
-            break;
-        }
-        let pivot =
-            (pivot_row..rows).max_by(|&a, &b| out[a][col].abs().total_cmp(&out[b][col].abs()));
-        let Some(pivot) = pivot else {
-            break;
-        };
-        if out[pivot][col].abs() < 1e-12 {
-            continue;
-        }
-        out.swap(pivot_row, pivot);
-        let divisor = out[pivot_row][col];
-        for value in &mut out[pivot_row] {
-            *value /= divisor;
-        }
-        let normalized_pivot = out[pivot_row].clone();
-        for row in 0..rows {
-            if row == pivot_row {
-                continue;
-            }
-            let factor = out[row][col];
-            if factor.abs() < 1e-12 {
-                out[row][col] = 0.0;
-                continue;
-            }
-            for j in 0..cols {
-                out[row][j] -= factor * normalized_pivot[j];
-                if out[row][j].abs() < 1e-12 {
-                    out[row][j] = 0.0;
-                }
-            }
-        }
-        pivot_row += 1;
-    }
-    Ok(out)
-}
-
 fn is_scalar_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -1796,6 +1741,10 @@ fn fmt_mat(m: &[Vec<f64>]) -> String {
     if m.is_empty() {
         return "   []".to_string();
     }
+    let cols = m.first().map_or(0, Vec::len);
+    if m.len().saturating_mul(cols) > MAX_INLINE_MATRIX_CELLS {
+        return format!("   {}×{} 矩阵（内容已省略）", m.len(), cols);
+    }
     // 防御：按最长行分配列宽，避免参差矩阵越界
     let cols = m.iter().map(|r| r.len()).max().unwrap_or(0);
     let mut widths = vec![0usize; cols];
@@ -1820,6 +1769,10 @@ fn fmt_mat(m: &[Vec<f64>]) -> String {
 }
 
 fn fmt_mat_compact(m: &[Vec<f64>]) -> String {
+    let cols = m.first().map_or(0, Vec::len);
+    if m.len().saturating_mul(cols) > MAX_INLINE_MATRIX_CELLS {
+        return format!("{}×{} 矩阵（内容已省略）", m.len(), cols);
+    }
     let rows: Vec<String> = m
         .iter()
         .map(|r| r.iter().map(|v| fmt_num(*v)).collect::<Vec<_>>().join(","))
@@ -1827,9 +1780,12 @@ fn fmt_mat_compact(m: &[Vec<f64>]) -> String {
     format!("[{}]", rows.join(";"))
 }
 
+const MAX_INLINE_MATRIX_CELLS: usize = 256;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::Pixel;
 
     fn eval(src: &str) -> Value {
         let mut env = Env::new();
@@ -1861,6 +1817,86 @@ mod tests {
         let _ = env.eval_line("b=[2,0;0,2]").unwrap();
         let (v, _) = eval_env(&mut env, "a*2");
         assert_eq!(v, Value::Mat(vec![vec![2.0, 4.0], vec![6.0, 8.0]]));
+    }
+
+    #[test]
+    fn quoted_windows_paths_preserve_backslashes() {
+        assert_eq!(
+            lex(r#"readtu("C:\new\a.png")"#).unwrap(),
+            vec![
+                Tok::Ident("readtu".to_string()),
+                Tok::LParen,
+                Tok::Text(r"C:\new\a.png".to_string()),
+                Tok::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn readtu_loads_grayscale_pixels_from_working_directory() {
+        let path = std::env::temp_dir().join(format!(
+            "rzend-readtu-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let image =
+            image::RgbImage::from_raw(2, 2, vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255])
+                .unwrap();
+        image.save(&path).unwrap();
+
+        let mut env = Env::new();
+        env.set_working_dir(path.parent().unwrap().to_path_buf());
+        let command = format!(
+            "a=readtu(\"{}\")",
+            path.file_name().unwrap().to_string_lossy()
+        );
+        env.eval_line(&command).unwrap();
+
+        let Some(Value::Mat(matrix)) = env.vars.get("a") else {
+            panic!("expected grayscale image matrix");
+        };
+        let expected: Vec<f64> = [
+            image::Rgb([255, 0, 0]),
+            image::Rgb([0, 255, 0]),
+            image::Rgb([0, 0, 255]),
+            image::Rgb([255, 255, 255]),
+        ]
+        .map(|pixel| f64::from(pixel.to_luma().0[0]))
+        .to_vec();
+        assert_eq!(
+            matrix,
+            &vec![expected[..2].to_vec(), expected[2..].to_vec()]
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn savetu_writes_clamped_rounded_grayscale_png() {
+        let directory = std::env::temp_dir().join(format!(
+            "rzend-savetu-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+
+        let mut env = Env::new();
+        env.set_working_dir(directory.clone());
+        env.eval_line("a=[-1,1.5;254.8,300]").unwrap();
+        env.eval_line("savetu(a, \"output.png\")").unwrap();
+
+        let saved = image::open(directory.join("output.png"))
+            .unwrap()
+            .to_luma8();
+        assert_eq!(saved.dimensions(), (2, 2));
+        assert_eq!(saved.into_raw(), vec![0, 2, 255, 255]);
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     fn eval_env(env: &mut Env, line: &str) -> (Value, Option<String>) {
@@ -1900,6 +1936,15 @@ mod tests {
             }
             _ => panic!("expected reduced row echelon matrix"),
         }
+    }
+
+    #[test]
+    fn faer_matrix_operations_handle_rank_and_singular_inputs() {
+        let mut env = Env::new();
+        env.eval_line("a=[1,2,3;2,4,6]").unwrap();
+        assert_eq!(eval_env(&mut env, "R(a)").0, Value::Num(1.0));
+        assert_eq!(eval_env(&mut env, "H(a*a')").0, Value::Num(0.0));
+        assert!(env.eval_line("N(a*a')").is_err());
     }
 
     #[test]

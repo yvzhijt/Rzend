@@ -20,7 +20,7 @@
       </div>
       <div class="ribbon-divider"></div>
       <div class="ribbon-section">
-        <button class="ribbon-btn accent" id="ribbon-run" title="仅运行当前 .yt 文件 (F5)">
+        <button class="ribbon-btn accent" id="ribbon-run" title="仅运行当前 .yt 文件">
           <span class="ribbon-btn-icon">▶</span><span class="ribbon-btn-text">运行</span>
         </button>
       </div>
@@ -49,7 +49,7 @@
       <!-- 左侧：当前文件夹 -->
       <div id="folder-panel">
         <div class="panel-header">
-          <span class="panel-title">当前文件夹</span>
+          <span class="panel-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>当前文件夹</span>
           <div class="panel-actions">
             <button class="panel-icon-btn" id="btn-refresh" title="刷新">↻</button>
             <button class="panel-icon-btn" id="btn-folder-up" title="上级目录">↑</button>
@@ -66,25 +66,58 @@
         <!-- 简易编辑器（默认隐藏） -->
         <div id="editor-panel" class="hidden">
           <div id="editor-toolbar">
+            <span class="panel-drag" title="拖动以移动面板">⠿</span>
             <span id="editor-filename"></span>
             <span id="editor-modified" class="hidden">● 已修改</span>
             <div class="editor-toolbar-actions">
-              <button id="btn-run-file" class="toolbar-btn" title="仅运行 .yt 文件 (F5)">▶ 运行</button>
+              <button id="btn-run-file" class="toolbar-btn" title="仅运行 .yt 文件">▶ 运行</button>
               <button id="btn-save-file" class="toolbar-btn" title="保存 (Ctrl+S)">💾 保存</button>
               <button id="btn-close-file" class="toolbar-btn" title="关闭">✕</button>
             </div>
           </div>
           <div class="editor-container">
-            <div id="line-numbers"></div>
-            <textarea id="code-textarea" spellcheck="false"></textarea>
+            <div id="editor-host"></div>
+            <div id="image-preview" class="hidden">
+              <div id="image-tools">
+                <div class="image-tool-row">
+                  <label>裁剪 x <input id="image-crop-x" type="number" min="0" value="0"></label>
+                  <label>y <input id="image-crop-y" type="number" min="0" value="0"></label>
+                  <label>宽 <input id="image-crop-width" type="number" min="1"></label>
+                  <label>高 <input id="image-crop-height" type="number" min="1"></label>
+                  <button id="image-crop-apply" class="toolbar-btn">裁剪</button>
+                </div>
+                <div class="image-tool-row">
+                  <label>缩放宽 <input id="image-resize-width" type="number" min="1"></label>
+                  <label>高 <input id="image-resize-height" type="number" min="1"></label>
+                  <button id="image-resize-apply" class="toolbar-btn">缩放</button>
+                  <button id="image-rotate-left" class="toolbar-btn" title="逆时针旋转 90°">↶ 90°</button>
+                  <button id="image-rotate-right" class="toolbar-btn" title="顺时针旋转 90°">↷ 90°</button>
+                  <select id="image-filter" aria-label="图片滤镜">
+                    <option value="">选择滤镜</option>
+                    <option value="grayscale">灰度</option>
+                    <option value="blur">模糊</option>
+                    <option value="sharpen">锐化</option>
+                    <option value="brighten">增亮</option>
+                    <option value="darken">变暗</option>
+                    <option value="contrast">增强对比度</option>
+                    <option value="invert">反色</option>
+                  </select>
+                  <button id="image-filter-apply" class="toolbar-btn">应用滤镜</button>
+                  <button id="image-reset" class="toolbar-btn">重置</button>
+                  <button id="image-save-as" class="toolbar-btn">另存为</button>
+                </div>
+              </div>
+              <img id="preview-image" alt="图片预览" />
+              <div id="preview-image-info"></div>
+            </div>
           </div>
-          <div class="splitter-v" id="split-editor"></div>
         </div>
+        <div class="splitter-v" id="split-editor"></div>
 
         <!-- 命令行窗口（主体） -->
         <div id="command-window">
           <div class="cmd-header">
-            <span class="cmd-title">命令行窗口</span>
+            <span class="cmd-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>命令行窗口</span>
             <div class="cmd-actions">
               <button class="panel-icon-btn" id="btn-clear-cmd" title="清空命令行 (clc)">🗑</button>
             </div>
@@ -97,6 +130,18 @@
             </div>
           </div>
         </div>
+        <div class="splitter-v hidden" id="split-terminal"></div>
+
+        <!-- 内嵌终端（PowerShell）：输入 cmd 唤出，cwd 与文件树双向同步 -->
+        <div id="terminal-panel" class="hidden">
+          <div class="cmd-header terminal-header">
+            <span class="cmd-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>终端<span id="terminal-shell" class="terminal-shell"></span><span id="terminal-cwd" class="terminal-cwd"></span></span>
+            <div class="cmd-actions">
+              <button class="panel-icon-btn" id="btn-terminal-close" title="隐藏终端（会话保留）">✕</button>
+            </div>
+          </div>
+          <div id="terminal-container"></div>
+        </div>
       </div>
 
       <div class="splitter" id="split-right"></div>
@@ -104,7 +149,7 @@
       <!-- 右侧：工作区 -->
       <div id="workspace-panel">
         <div class="panel-header">
-          <span class="panel-title">工作区</span>
+          <span class="panel-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>工作区</span>
           <div class="panel-actions">
             <button class="panel-icon-btn" id="btn-clear-workspace" title="清空工作区 (clear)">🗑</button>
           </div>
@@ -114,48 +159,6 @@
             名称<span class="ws-header-value">值</span><span class="ws-header-type">类型</span><span class="ws-header-size">大小</span>
           </div>
           <div id="workspace-vars"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 电路仿真画布 -->
-    <div id="circuit-view" class="hidden">
-      <div id="circ-toolbar">
-        <span class="sim-title">电路仿真</span>
-        <button class="toolbar-btn accent" id="circ-run">▶ 运行</button>
-        <button class="toolbar-btn" id="circ-save">💾 保存</button>
-        <button class="toolbar-btn" id="circ-save-as">💾 另存为</button>
-        <button class="toolbar-btn" id="circ-open">📂 打开</button>
-        <button class="toolbar-btn" id="circ-clear">清空</button>
-        <span class="sim-sep"></span>
-        <label class="sim-field">时长 <input id="circ-duration" type="number" value="0.005" step="0.001" min="0.000001"></label>
-        <label class="sim-field">步长 <input id="circ-dt" type="number" value="0.000002" step="0.0000001" min="0.000000001"></label>
-        <span class="sim-status" id="circ-status">就绪</span>
-        <button class="toolbar-btn sim-close" id="circ-close">✕ 关闭</button>
-      </div>
-      <div id="circ-body">
-        <div id="circ-palette">
-          <input id="circ-search" class="circ-search" type="text" placeholder="搜索元件" autocomplete="off">
-          <div id="circ-palette-list"></div>
-        </div>
-        <div id="circ-canvas-wrap">
-          <svg id="circ-canvas">
-            <defs>
-              <pattern id="circ-grid-pattern" width="12" height="12" patternUnits="userSpaceOnUse">
-                <circle cx="6" cy="6" r="1" fill="#d2d9e1" />
-              </pattern>
-            </defs>
-            <rect x="0" y="0" width="100%" height="100%" fill="url(#circ-grid-pattern)" />
-            <g id="circ-wires-layer"></g>
-            <g id="circ-temp-layer"></g>
-            <g id="circ-elements-layer"></g>
-          </svg>
-          <div id="circ-open-list" class="hidden"></div>
-          <div id="circ-empty" class="circ-empty hidden">画布为空 · 在左侧搜索元件后点击添加</div>
-        </div>
-        <div id="circ-props">
-          <div class="panel-header"><span class="panel-title">元件参数</span></div>
-          <div id="circ-props-body"><div class="placeholder-content">选中一个元件</div></div>
         </div>
       </div>
     </div>
@@ -171,21 +174,7 @@
       <div id="scope-legend"></div>
     </div>
 
-    <!-- 脚本输入（input()）对话框 -->
-    <div id="stdin-modal" class="modal-backdrop hidden">
-      <div class="modal-card">
-        <div class="modal-title">脚本需要输入</div>
-        <div class="modal-body">
-          <div id="stdin-hint" class="modal-hint">该脚本调用了 input()，请每行填写一个输入值，运行时按顺序提供给脚本。</div>
-          <textarea id="stdin-input" rows="5" spellcheck="false" placeholder="第一行的输入值&#10;第二行的输入值"></textarea>
-          <div id="stdin-error" class="modal-error"></div>
-        </div>
-        <div class="modal-actions">
-          <button id="stdin-cancel" class="toolbar-btn">取消</button>
-          <button id="stdin-ok" class="toolbar-btn primary">运行</button>
-        </div>
-      </div>
-    </div>
+
 
     <!-- 状态栏 -->
     <div id="statusbar">

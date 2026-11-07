@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 mod commands;
+mod terminal;
 mod yt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,21 +26,8 @@ pub struct WorkspaceVar {
 pub struct AppState {
     pub cwd: Arc<Mutex<PathBuf>>,
     pub yt: Arc<Mutex<yt::Env>>,
-    pub py: Arc<Mutex<PyState>>,
-}
-
-#[derive(Default)]
-pub struct PyState {
-    pub lines: Vec<String>,
-    pub pending: Vec<String>,
-    pub last_output: String,
-    pub gen: u64, // 会话代数：py_start/py_stop 递增，用于丢弃过期结果
-}
-
-#[derive(serde::Serialize)]
-pub struct PyReply {
-    pub output: String,
-    pub pending: bool,
+    pub circuit_pending: Arc<Mutex<Option<String>>>,
+    pub terminal: terminal::TerminalSlot,
 }
 
 impl AppState {
@@ -49,23 +37,30 @@ impl AppState {
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             )),
             yt: Arc::new(Mutex::new(yt::Env::new())),
-            py: Arc::new(Mutex::new(PyState::default())),
+            circuit_pending: Arc::new(Mutex::new(None)),
+            terminal: terminal::new_slot(),
         }
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::scan_directory,
             commands::read_file_content,
+            commands::read_image_preview,
+            commands::transform_image,
             commands::write_file_content,
             commands::create_file,
             commands::open_folder_dialog,
+            commands::open_file_dialog,
+            commands::open_circuit_window,
+            commands::take_circuit_pending,
+            commands::close_circuit_window,
             commands::save_file_dialog,
             commands::get_initial_dir,
             commands::shell_pwd,
@@ -77,16 +72,25 @@ pub fn run() {
             commands::yt_reset,
             commands::get_workspace,
             commands::run_yt_file,
-            commands::run_pyt_file,
-            commands::py_start,
-            commands::py_send,
-            commands::py_stop,
+            terminal::pty_spawn,
+            terminal::pty_write,
+            terminal::pty_resize,
+            terminal::pty_sync_cwd,
+            terminal::pty_kill,
         ])
         .setup(|app| {
             // 窗口可能尚未就绪，取不到不算致命错误
             let _ = app.get_webview_window("main");
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        // 退出前杀掉内嵌 cmd.exe，避免残留孤儿进程
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            let state = app_handle.state::<AppState>();
+            terminal::kill_existing(&state.terminal);
+        }
+    });
 }

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rzend 信号系统仿真</title>
+  <link rel="stylesheet" href="/src/styles/main.css" />
+</head>
+<body>
+  <div id="signal-view">
+    <div id="sig-toolbar">
+      <span class="sim-title">信号系统仿真</span>
+      <div class="sim-mode-group">
+        <button class="toolbar-btn accent" id="sig-mason" title="梅森增益公式分析">🧮 梅森分析</button>
+      </div>
+      <details class="sim-settings">
+        <summary>⚙ 设置</summary>
+        <label class="sim-field">文件格式
+          <span style="font-size:11px;color:var(--dim);margin-left:4px">信号流图 (*.sig)</span>
+        </label>
+      </details>
+      <span class="sim-sep"></span>
+      <button class="toolbar-btn" id="sig-save">💾 保存</button>
+      <button class="toolbar-btn" id="sig-save-as">💾 另存为</button>
+      <button class="toolbar-btn" id="sig-open">📂 打开</button>
+      <button class="toolbar-btn" id="sig-clear">清空</button>
+      <span class="sim-status" id="sig-status">就绪</span>
+      <button class="toolbar-btn sim-close" id="sig-close">✕ 关闭窗口</button>
+    </div>
+    <div id="sig-body">
+      <div id="sig-palette">
+        <div class="panel-header sig-palette-header">
+          <span class="panel-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>节点库</span>
+        </div>
+        <input id="sig-search" class="circ-search" type="text" placeholder="搜索节点" autocomplete="off">
+        <div id="sig-palette-list"></div>
+      </div>
+      <div id="sig-canvas-wrap">
+        <svg id="sig-canvas">
+          <defs>
+            <pattern id="sig-grid-pattern" width="12" height="12" patternUnits="userSpaceOnUse">
+              <circle cx="6" cy="6" r="1" fill="#d4d4d4" />
+            </pattern>
+            <marker id="sig-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 Z" fill="#3976a8" />
+            </marker>
+          </defs>
+          <rect x="0" y="0" width="100%" height="100%" fill="url(#sig-grid-pattern)" />
+          <g id="sig-wires-layer"></g>
+          <g id="sig-temp-layer"></g>
+          <g id="sig-elements-layer"></g>
+        </svg>
+        <div id="sig-empty" class="circ-empty hidden">画布为空 · 在左侧搜索节点后点击添加</div>
+      </div>
+      <div id="sig-props">
+        <div class="panel-header"><span class="panel-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>节点属性</span></div>
+        <div id="sig-props-body"><div class="placeholder-content">选中一个节点</div></div>
+      </div>
+    </div>
+    <div id="sig-context-menu" class="circ-context-menu hidden" role="menu">
+      <button type="button" role="menuitem" data-action="edit-tf">编辑传递函数</button>
+      <button type="button" role="menuitem" data-action="add-input">添加输入端</button>
+      <button type="button" role="menuitem" data-action="remove-input">移除输入端</button>
+      <button type="button" role="menuitem" data-action="delete-sg">删除节点</button>
+    </div>
+  </div>
+
+  <script type="module" src="/src/sig.js"></script>
+</body>
+</html>

@@ -1,6 +1,8 @@
-use faer::linalg::solvers::Eigen;
+use faer::linalg::solvers::{DenseSolveCore, Eigen, PartialPivLu, Svd};
 use faer::Mat;
+use image::{ImageReader, Limits};
 use num_complex::Complex64;
+use std::path::Path;
 
 use super::{BinOp, Env, Expr};
 
@@ -62,6 +64,7 @@ pub(super) fn expression_polynomial(
             }
         }
         Expr::Call(_, _) | Expr::MatLit(_) | Expr::Transpose(_) => Ok(None),
+        Expr::Text(_) => Ok(None),
     }
 }
 
@@ -106,6 +109,175 @@ fn polynomial_value(coefficients: &[Complex64], x: Complex64) -> Complex64 {
         .fold(Complex64::new(0.0, 0.0), |value, coefficient| {
             value * x + coefficient
         })
+}
+
+fn matrix_from_rows(matrix: &[Vec<f64>]) -> Mat<f64> {
+    let rows = matrix.len();
+    let cols = matrix.first().map_or(0, Vec::len);
+    Mat::from_fn(rows, cols, |i, j| matrix[i][j])
+}
+
+fn matrix_to_rows(matrix: &Mat<f64>) -> Vec<Vec<f64>> {
+    (0..matrix.nrows())
+        .map(|i| (0..matrix.ncols()).map(|j| matrix[(i, j)]).collect())
+        .collect()
+}
+
+pub(super) fn read_grayscale_image(path: &Path) -> Result<Vec<Vec<f64>>, String> {
+    let mut reader = ImageReader::open(path)
+        .map_err(|error| format!("无法打开图片 {}: {}", path.display(), error))?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let image = reader
+        .decode()
+        .map_err(|error| format!("无法解码图片 {}: {}", path.display(), error))?
+        .to_luma8();
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return Err(format!("图片尺寸无效: {}", path.display()));
+    }
+    if u64::from(width) * u64::from(height) > 8_388_608 {
+        return Err(format!(
+            "图片像素数量过大（{}×{}），最多支持 8388608 个像素",
+            width, height
+        ));
+    }
+
+    Ok((0..height)
+        .map(|row| {
+            (0..width)
+                .map(|col| f64::from(image.get_pixel(col, row).0[0]))
+                .collect()
+        })
+        .collect())
+}
+
+pub(super) fn save_grayscale_image(matrix: &[Vec<f64>], path: &Path) -> Result<(), String> {
+    let height = matrix.len();
+    let width = matrix.first().map_or(0, Vec::len);
+    if height == 0 || width == 0 || matrix.iter().any(|row| row.len() != width) {
+        return Err("savetu() 要求非空且每行列数一致的矩阵".to_string());
+    }
+    if width > 16_384 || height > 16_384 || width.saturating_mul(height) > 8_388_608 {
+        return Err("图片尺寸过大，最多支持 16384×16384 且不超过 8388608 个像素".to_string());
+    }
+
+    let mut pixels = Vec::with_capacity(width * height);
+    for (row_index, row) in matrix.iter().enumerate() {
+        for (col_index, &value) in row.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(format!(
+                    "savetu() 的像素值必须是有限数值（第 {} 行，第 {} 列）",
+                    row_index + 1,
+                    col_index + 1
+                ));
+            }
+            pixels.push(value.round().clamp(0.0, 255.0) as u8);
+        }
+    }
+
+    let image = image::GrayImage::from_raw(width as u32, height as u32, pixels)
+        .ok_or_else(|| "无法创建灰度图片".to_string())?;
+    image
+        .save(path)
+        .map_err(|error| format!("保存图片失败 {}: {}", path.display(), error))
+}
+
+pub(super) fn matrix_det(matrix: &[Vec<f64>]) -> Result<f64, String> {
+    let n = matrix.len();
+    if n == 0 || matrix.iter().any(|row| row.len() != n) {
+        return Err("H() 要求方阵".to_string());
+    }
+
+    let a = matrix_from_rows(matrix);
+    let lu = PartialPivLu::new(a.as_ref());
+    if (0..n).any(|i| lu.U()[(i, i)].abs() < 1e-12) {
+        return Ok(0.0);
+    }
+    Ok(a.as_ref().determinant())
+}
+
+pub(super) fn matrix_inverse(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
+    let n = matrix.len();
+    if n == 0 || matrix.iter().any(|row| row.len() != n) {
+        return Err("N() 要求方阵".to_string());
+    }
+
+    let a = matrix_from_rows(matrix);
+    let lu = PartialPivLu::new(a.as_ref());
+    if (0..n).any(|i| lu.U()[(i, i)].abs() < 1e-12) {
+        return Err("矩阵奇异，不可逆".to_string());
+    }
+    Ok(matrix_to_rows(&lu.inverse()))
+}
+
+pub(super) fn matrix_rank(matrix: &[Vec<f64>]) -> Result<usize, String> {
+    let rows = matrix.len();
+    let cols = matrix.first().map_or(0, Vec::len);
+    if rows == 0 || cols == 0 || matrix.iter().any(|row| row.len() != cols) {
+        return Err("R() 要求非空且每行列数一致的矩阵".to_string());
+    }
+
+    let a = matrix_from_rows(matrix);
+    let svd = Svd::new(a.as_ref()).map_err(|_| "R() 无法完成奇异值分解".to_string())?;
+    Ok((0..svd.S().column_vector().nrows())
+        .filter(|&i| svd.S()[i].abs() > 1e-10)
+        .count())
+}
+
+pub(super) fn matrix_rref(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
+    let rows = matrix.len();
+    let cols = matrix.first().map_or(0, Vec::len);
+    if rows == 0 || cols == 0 || matrix.iter().any(|row| row.len() != cols) {
+        return Err("GS() 要求非空且每行列数一致的矩阵".to_string());
+    }
+
+    let mut out = matrix_from_rows(matrix);
+    let mut pivot_row = 0;
+    for col in 0..cols {
+        if pivot_row == rows {
+            break;
+        }
+        let pivot =
+            (pivot_row..rows).max_by(|&a, &b| out[(a, col)].abs().total_cmp(&out[(b, col)].abs()));
+        let Some(pivot) = pivot else {
+            break;
+        };
+        if out[(pivot, col)].abs() < 1e-12 {
+            continue;
+        }
+        for j in 0..cols {
+            let value = out[(pivot_row, j)];
+            out[(pivot_row, j)] = out[(pivot, j)];
+            out[(pivot, j)] = value;
+        }
+        let divisor = out[(pivot_row, col)];
+        for j in 0..cols {
+            out[(pivot_row, j)] /= divisor;
+        }
+        let normalized_pivot: Vec<f64> = (0..cols).map(|j| out[(pivot_row, j)]).collect();
+        for row in 0..rows {
+            if row == pivot_row {
+                continue;
+            }
+            let factor = out[(row, col)];
+            if factor.abs() < 1e-12 {
+                out[(row, col)] = 0.0;
+                continue;
+            }
+            for j in 0..cols {
+                out[(row, j)] -= factor * normalized_pivot[j];
+                if out[(row, j)].abs() < 1e-12 {
+                    out[(row, j)] = 0.0;
+                }
+            }
+        }
+        pivot_row += 1;
+    }
+    Ok(matrix_to_rows(&out))
 }
 
 pub(super) fn polynomial_roots(coefficients: &[Complex64]) -> Result<Vec<Complex64>, String> {
@@ -215,7 +387,7 @@ pub(super) fn matrix_eigen(
         return Err("T() 要求非空方阵".to_string());
     }
 
-    let a = Mat::from_fn(n, n, |i, j| matrix[i][j]);
+    let a = matrix_from_rows(matrix);
     let evd = Eigen::new_from_real(a.as_ref())
         .map_err(|_| "T() 无法完成特征分解（矩阵可能非常病态或不可对角化）".to_string())?;
     let u = evd.U();

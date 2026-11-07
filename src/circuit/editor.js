@@ -2,7 +2,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import {
   ELEMENTS, GRID_OFFSET, H, W, createComponent, defaultCircuit, deserialize,
-  normalizeRot, pinLocal, pinPos, serialize, simulate, snapGrid, snapPoint, uid,
+  initSimulation, netVoltage, normalizeRot, pinLocal, pinPos, serialize, simulate,
+  snapGrid, snapPoint, stepSimulation, uid,
 } from './model.js';
 import { closeFigure, fmtTime, showFigure } from '../figure.js';
 
@@ -17,12 +18,22 @@ const C = {
   cursor: null,
   snap: null,       // { port, x, y }
   hoverPin: null,   // 悬停中的端子 key
+  contextTarget: null,
   visible: false,
   readings: new Map(),
   opts: {},
 };
 
 const $ = (s) => document.querySelector(s);
+
+/* 实时仿真（通电）状态：rAF 驱动步进引擎，墙钟时间 × 速度档位推进 */
+const RT_SPEEDS = [1, 0.1, 0.01];
+const RT_MAX_STEPS = 6000;      // 每帧最多推进步数，超出则丢弃积压（自动降速而不是卡死）
+const FLOW_DOT_COUNT = 3;
+const RT = {
+  on: false, raf: 0, last: 0, statusAt: 0, speedIdx: 0, sim: null, phase: new Map(), warned: false,
+};
+const rtSpeed = () => RT_SPEEDS[RT.speedIdx];
 
 function el(tag, attrs = {}, text) {
   const n = document.createElementNS(NS, tag);
@@ -46,9 +57,16 @@ export function initCircuit(opts) {
   bindToolbar();
   bindCanvas();
   bindKeys();
+  // 切走/隐藏窗口时自动断电，避免后台空转求解
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) pausePower();
+  });
 }
 
+export function getModel() { return C.model; }
+
 export function openCircuit() {
+  pausePower();
   if (!C.model) C.model = defaultCircuit();
   C.path = null;
   C.sel = null;
@@ -58,6 +76,7 @@ export function openCircuit() {
 }
 
 export function openCircuitFile(path) {
+  pausePower();
   return invoke('read_file_content', { path })
     .then((text) => {
       C.model = deserialize(JSON.parse(text));
@@ -74,10 +93,11 @@ export function openCircuitFile(path) {
 }
 
 export function closeCircuit() {
-  $('#circuit-view')?.classList.add('hidden');
+  pausePower();
   closeFigure();
   C.visible = false;
-  $('#cmd-input')?.focus();
+  // 独立窗口：直接关闭电路仿真窗口
+  invoke('close_circuit_window').catch(() => {});
 }
 
 function show() {
@@ -126,6 +146,16 @@ function exitDir(anchor) {
   const c = componentById(id);
   if (!c) return null;
   if (c.type === 'GND') return { x: 0, y: 1 };
+  if (ELEMENTS[c.type]?.group === '数字逻辑') {
+    // 最后一个引脚是输出（向右），其余为输入（向左）
+    const direction = Number(idx) === c.pins - 1 ? { x: 1, y: 0 } : { x: -1, y: 0 };
+    switch (normalizeRot(c.rot)) {
+      case 90: return { x: -direction.y, y: direction.x };
+      case 180: return { x: -direction.x, y: -direction.y };
+      case 270: return { x: direction.y, y: -direction.x };
+      default: return direction;
+    }
+  }
   return Number(idx) === 0 ? { x: -1, y: 0 } : { x: 1, y: 0 };
 }
 
@@ -291,10 +321,13 @@ function elementNode(c) {
   g.appendChild(el('text', {
     x: W / 2, y: labelY, 'text-anchor': 'middle', class: 'circ-label',
   }, c.describe()));
-  if (reading && (c.type === 'A' || c.type === 'VM')) {
+  const hasLiveReading = c.type === 'A' || c.type === 'VM' || c.type === 'P' || c.type === 'TF'
+    || ELEMENTS[c.type].group === '数字逻辑';
+  if (hasLiveReading) {
     g.appendChild(el('text', {
       x: W / 2, y: labelY + 14, 'text-anchor': 'middle', class: 'circ-reading',
-    }, fmtValue(reading.value, reading.unit)));
+      'data-reading': c.id,
+    }, reading ? fmtValue(reading.value, reading.unit) : '—'));
   }
   return g;
 }
@@ -314,6 +347,51 @@ function paintPorts() {
   });
 }
 
+// 数字逻辑门符号：D 形=与/与非，盾形=或/或非，盾形+输入弧=异或/同或，
+// 三角=非，输出端小圆圈表示取反。
+function gateSymbolParts(type, color, line, txt) {
+  const y = H / 2;
+  const parts = [];
+  const stroke = { fill: '#fff', stroke: color, 'stroke-width': 2 };
+  const bubble = (cx) => parts.push(el('circle', { cx, cy: y, r: 6, fill: '#fff', stroke: color, 'stroke-width': 2 }));
+  const inverted = type === 'NAND' || type === 'NOR' || type === 'XNOR' || type === 'NOT';
+
+  if (type === 'NOT') {
+    parts.push(line(0, y, 38, y));
+    parts.push(el('path', {
+      d: 'M38 8 L38 40 L74 24 Z',
+      ...stroke,
+      fill: 'rgba(138,79,181,0.10)',
+      'stroke-linejoin': 'round',
+    }));
+    bubble(81);
+    parts.push(line(87, y, W, y));
+    parts.push(el('text', { x: 25, y: 17, 'text-anchor': 'middle', class: 'circ-pin-label' }, 'A'));
+    parts.push(el('text', { x: 102, y: 17, 'text-anchor': 'middle', class: 'circ-pin-label' }, 'Y'));
+    return parts;
+  }
+
+  const rectGate = type === 'AND' || type === 'NAND';
+  parts.push(line(0, 12, 38, 12), line(0, 36, 38, 36));
+
+  if (rectGate) {
+    parts.push(el('path', { d: 'M38 8 H55 A16 16 0 0 1 55 40 H38 Z', ...stroke }));
+    txt(52, '&');
+  } else {
+    // 盾形门体；异或类再多一条输入弧
+    parts.push(el('path', { d: 'M38 8 Q58 24 38 40 Q62 40 78 24 Q62 8 38 8 Z', ...stroke }));
+    if (type === 'XOR' || type === 'XNOR') {
+      parts.push(el('path', { d: 'M32 8 Q52 24 32 40', fill: 'none', stroke: color, 'stroke-width': 2 }));
+    }
+    txt(56, '≥1');
+  }
+
+  const outX = rectGate ? 71 : 78;
+  if (inverted) bubble(outX);
+  parts.push(line(inverted ? outX + 6 : outX, y, W, y));
+  return parts;
+}
+
 function symbolParts(c) {
   const color = ELEMENTS[c.type].color || '#44515c';
   const y = H / 2;
@@ -323,6 +401,10 @@ function symbolParts(c) {
   });
   const txt = (x, t, cls = 'circ-sym') => el('text', { x, y: y + 5, 'text-anchor': 'middle', class: cls }, t);
 
+  if (ELEMENTS[c.type]?.group === '数字逻辑') {
+    return gateSymbolParts(c.type, color, line, txt);
+  }
+
   switch (c.type) {
     case 'R': {
       parts.push(line(0, y, 36, y));
@@ -331,6 +413,45 @@ function symbolParts(c) {
         fill: 'none', stroke: color, 'stroke-width': 2,
       }));
       parts.push(line(80, y, W, y));
+      break;
+    }
+    case 'IMP':
+    case 'STEP':
+    case 'RAMP':
+    case 'PARABOLA': {
+      parts.push(line(0, y, 42, y), line(78, y, W, y));
+      parts.push(el('circle', { cx: 60, cy: y, r: 18, fill: '#fff', stroke: color, 'stroke-width': 2 }));
+      const path = c.type === 'IMP' ? 'M48 30 L57 30 L60 13 L63 30 L72 30'
+        : c.type === 'STEP' ? 'M49 30 H58 V15 H72'
+          : c.type === 'RAMP' ? 'M49 30 L72 15'
+            : 'M49 30 Q59 29 72 15';
+      parts.push(el('path', {
+        d: path, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-linecap': 'round',
+      }));
+      break;
+    }
+    case 'TF': {
+      parts.push(line(0, 12, 16, 12), line(0, 36, 16, 36));
+      parts.push(line(104, 12, W, 12), line(104, 36, W, 36));
+      parts.push(el('rect', {
+        x: 16, y: 4, width: 88, height: 40, rx: 5,
+        fill: 'rgba(47,125,104,0.08)', stroke: color, 'stroke-width': 2,
+      }));
+      parts.push(el('text', {
+        x: 60, y: 28, 'text-anchor': 'middle', class: 'circ-sym',
+      }, 'H(s)'));
+      parts.push(el('text', {
+        x: 23, y: 15, class: 'circ-pin-label',
+      }, 'A'));
+      parts.push(el('text', {
+        x: 23, y: 39, class: 'circ-pin-label',
+      }, 'B'));
+      parts.push(el('text', {
+        x: 97, y: 15, 'text-anchor': 'end', class: 'circ-pin-label',
+      }, 'Y+'));
+      parts.push(el('text', {
+        x: 97, y: 39, 'text-anchor': 'end', class: 'circ-pin-label',
+      }, 'Y−'));
       break;
     }
     case 'C': {
@@ -367,6 +488,32 @@ function symbolParts(c) {
       parts.push(el('polyline', {
         points: '63,19 69,24 63,29', fill: 'none', stroke: color, 'stroke-width': 2,
       }));
+      break;
+    }
+    case 'CLK': {
+      parts.push(line(0, y, 45, y), line(75, y, W, y));
+      parts.push(el('circle', { cx: 60, cy: y, r: 15, fill: '#fff', stroke: color, 'stroke-width': 2 }));
+      // 方波符号
+      parts.push(el('polyline', {
+        points: '50,30 56,30 56,18 64,18 64,30 70,30',
+        fill: 'none', stroke: color, 'stroke-width': 2,
+      }));
+      break;
+    }
+    case 'D': {
+      parts.push(line(0, y, 42, y), line(76, y, W, y));
+      parts.push(el('path', {
+        d: 'M44 11 L68 24 L44 37 Z',
+        fill: 'rgba(0,114,189,0.12)', stroke: color, 'stroke-width': 2,
+        'stroke-linejoin': 'round',
+      }));
+      parts.push(line(70, 10, 70, 38));
+      parts.push(el('text', {
+        x: 43, y: 9, 'text-anchor': 'middle', class: 'circ-pin-label',
+      }, 'A'));
+      parts.push(el('text', {
+        x: 70, y: 9, 'text-anchor': 'middle', class: 'circ-pin-label',
+      }, 'K'));
       break;
     }
     case 'A':
@@ -413,7 +560,7 @@ function renderNets() {
     });
     (net.junctions || []).forEach((p) => {
       layer.appendChild(el('circle', {
-        cx: p.x, cy: p.y, r: 3.6, class: 'circ-junction',
+        cx: p.x, cy: p.y, r: 3.6, class: 'circ-junction', 'data-net': net.id,
         fill: selected ? '#0072bd' : '#39485a',
       }));
     });
@@ -445,20 +592,244 @@ function renderProps() {
   const def = ELEMENTS[c.type];
   const rows = [`<div class="prop-head">${def.cn}<span class="prop-id">${c.id}</span></div>`];
   (def.params || []).forEach((p) => {
+    const type = p.type === 'text' ? 'text' : 'number';
+    const step = p.type === 'text' ? '' : 'step="any"';
     rows.push(`<div class="prop-row"><label>${p.label}</label>
-      <input type="number" step="any" data-key="${p.key}" value="${c.params[p.key] ?? p.def}"></div>`);
+      <input type="${type}" ${step} data-key="${p.key}" value="${escapeHtml(c.params[p.key] ?? p.def)}"></div>`);
   });
-  if (!(def.params || []).length) rows.push('<div class="prop-empty">该元件无可调参数</div>');
+  if (def.group === '数字逻辑') {
+    rows.push('<div class="prop-empty">输入按阈值判定；有限输入/输出电阻参与 KCL 求解</div>');
+  } else if (c.type === 'D') {
+    rows.push('<div class="prop-empty">Shockley 指数模型；参考压降对应 1mA 工作点</div>');
+  } else if (c.type === 'TF') {
+    rows.push('<div class="prop-empty">A/B 输入差分电压，Y+/Y− 输出；分子、分母支持 s 多项式（如 s^2+2*s+1），最高 8 阶</div>');
+  } else if (def.group === '信号源') {
+    rows.push('<div class="prop-empty">输出单位电压函数；单位脉冲按当前时间步归一化面积</div>');
+  } else if (!(def.params || []).length) {
+    rows.push('<div class="prop-empty">该元件无可调参数</div>');
+  }
   const rd = C.readings.get(c.id);
-  if (rd) rows.push(`<div class="prop-readout">读数 ${fmtValue(rd.value, rd.unit)}</div>`);
+  if (rd || ['A', 'VM', 'P', 'TF'].includes(c.type)
+    || ELEMENTS[c.type].group === '数字逻辑') {
+    rows.push(`<div class="prop-readout" data-live-reading="${c.id}">读数 ${rd ? fmtValue(rd.value, rd.unit) : '—'}</div>`);
+  }
   rows.push('<div class="prop-tip">元件、拐点与引脚均自动吸附 12px 网格；左键点端子开始连线，点空白处落拐点，点目标端子完成；右键元件旋转 90°；拖动移动；Delete 删除</div>');
   box.innerHTML = rows.join('');
 
   box.querySelectorAll('input[data-key]').forEach((inp) => {
     inp.addEventListener('change', () => {
-      c.params[inp.dataset.key] = Number(inp.value);
+      pausePower();
+      const param = def.params.find((item) => item.key === inp.dataset.key);
+      c.params[inp.dataset.key] = param?.type === 'text' ? inp.value.trim() : Number(inp.value);
       render();
     });
+  });
+}
+
+/* ---------------- 实时仿真（通电） ----------------
+ * 与瞬态批量仿真共用步进引擎（initSimulation / stepSimulation）：
+ * 每帧把墙钟流逝时间 × 速度档位折算成仿真时间，推进步进直到追平为止。
+ * 编辑电路会自动断电，防止改到一半把求解器状态搞乱。
+ */
+
+function voltageColor(v, scale) {
+  const t = Math.max(-1, Math.min(1, v / Math.max(0.5, scale)));
+  const a = Math.pow(Math.abs(t), 0.7);
+  const from = [0x39, 0x48, 0x5a]; // 默认导线色 #39485a
+  const to = t >= 0 ? [0xd9, 0x53, 0x19] : [0x1e, 0x6f, 0xd9]; // 正电位橙 / 负电位蓝
+  const mix = (i) => Math.round(from[i] + (to[i] - from[i]) * a);
+  return `rgb(${mix(0)},${mix(1)},${mix(2)})`;
+}
+
+function updatePowerBtn() {
+  const btn = $('#circ-power');
+  if (btn) {
+    btn.classList.toggle('power-on', RT.on);
+    btn.textContent = RT.on ? '⏸ 暂停实时' : '▶ 实时运行';
+  }
+  const spd = $('#circ-speed');
+  if (spd) spd.textContent = `×${rtSpeed()}`;
+  const duration = $('#circ-duration');
+  if (duration) duration.disabled = RT.on;
+  const dt = $('#circ-dt');
+  if (dt) dt.disabled = RT.on;
+}
+
+function togglePower() {
+  if (RT.on) {
+    pausePower('已断电');
+    return;
+  }
+  if (!C.model) return;
+  updateModelSettings();
+  let sim;
+  try {
+    sim = initSimulation(C.model, { record: false, skipStepCap: true });
+  } catch (e) {
+    status(String(e.message || e), true);
+    return;
+  }
+  RT.sim = sim;
+  RT.on = true;
+  RT.warned = false;
+  RT.phase.clear();
+  RT.last = performance.now();
+  RT.statusAt = 0;
+  // 与 sim.readings 共享引用，commit 原地更新，画布表读数每帧可直接取
+  C.readings = sim.readings;
+  updatePowerBtn();
+  status(`${sim.domain === 'signal' ? '信号流' : '电路'}实时运行中（×${rtSpeed()}）`);
+  RT.raf = requestAnimationFrame(rtFrame);
+}
+
+function pausePower(msg) {
+  const wasOn = RT.on;
+  RT.on = false;
+  cancelAnimationFrame(RT.raf);
+  RT.sim = null;
+  RT.phase.clear();
+  $('#circ-flow-layer')?.remove();
+  updatePowerBtn();
+  if (wasOn || msg) renderNets(); // 恢复导线与接点的默认着色
+  if (msg) status(msg);
+}
+
+function cycleSpeed() {
+  RT.speedIdx = (RT.speedIdx + 1) % RT_SPEEDS.length;
+  RT.warned = false;
+  updatePowerBtn();
+  if (RT.on) status(`实时速度 ×${rtSpeed()}`);
+}
+
+function showElementMenu(target, x, y) {
+  const menu = $('#circ-context-menu');
+  if (!menu) return;
+  C.contextTarget = target.id;
+  C.sel = { kind: 'el', id: target.id };
+  render();
+  menu.classList.remove('hidden');
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - rect.width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - rect.height - 4))}px`;
+}
+
+function hideElementMenu() {
+  $('#circ-context-menu')?.classList.add('hidden');
+  C.contextTarget = null;
+}
+
+function updateModelSettings() {
+  if (!C.model) return;
+  C.model.duration = Number($('#circ-duration').value) || 0.01;
+  C.model.dt = Number($('#circ-dt').value) || 1e-5;
+}
+
+function rtFrame(ts) {
+  if (!RT.on || !RT.sim) return;
+  const wall = Math.min(0.1, Math.max(0, (ts - RT.last) / 1000));
+  RT.last = ts;
+  const sim = RT.sim;
+  let budget = (sim.rtAcc || 0) + wall * rtSpeed();
+  let ran = 0;
+  try {
+    while (budget >= sim.dt && ran < RT_MAX_STEPS) {
+      budget -= sim.dt;
+      stepSimulation(sim);
+      ran++;
+    }
+  } catch (e) {
+    pausePower();
+    status(String(e.message || e), true);
+    return;
+  }
+  sim.rtAcc = ran >= RT_MAX_STEPS ? 0 : budget;
+  if (ran >= RT_MAX_STEPS && !RT.warned) {
+    RT.warned = true;
+    status('求解速度跟不上，已自动降速（可增大步长）', true);
+  }
+  if (!RT.warned && ts - RT.statusAt >= 250) {
+    RT.statusAt = ts;
+    status(`实时仿真 t=${sim.t.toPrecision(4)} s（×${rtSpeed()}）`);
+  }
+  paintLive(wall);
+  RT.raf = requestAnimationFrame(rtFrame);
+}
+
+function paintLive(wall) {
+  const sim = RT.sim;
+  const nets = C.model?.nets || [];
+  // 1) 导线与接点按电位着色（本帧最大电位做归一化，0.5V 兜底）
+  let scale = 0.5;
+  nets.forEach((net) => {
+    const v = netVoltage(sim, net.id);
+    if (v != null && Math.abs(v) > scale) scale = Math.abs(v);
+  });
+  const selNet = C.sel?.kind === 'net' ? C.sel.id : null;
+  const paint = (node) => {
+    const id = node.getAttribute('data-net');
+    if (id === selNet) return; // 选中网络保持高亮
+    const v = netVoltage(sim, id);
+    if (v == null) return;
+    const c = voltageColor(v, scale);
+    if (node.classList.contains('circ-wire')) node.setAttribute('stroke', c);
+    else node.setAttribute('fill', c);
+  };
+  $('#circ-wires-layer')?.querySelectorAll('.circ-wire, .circ-junction').forEach(paint);
+  // 2) 元件电流点：pin0 → pin1 移动
+  paintFlowDots(sim, wall);
+  // 3) 表读数
+  document.querySelectorAll('#circ-elements-layer [data-reading]').forEach((node) => {
+    const rd = sim.readings.get(node.dataset.reading);
+    if (rd) node.textContent = fmtValue(rd.value, rd.unit);
+  });
+  const selectedReading = C.sel?.kind === 'el' ? sim.readings.get(C.sel.id) : null;
+  const propertyReadout = $('#circ-props-body [data-live-reading]');
+  if (propertyReadout) {
+    propertyReadout.textContent = selectedReading
+      ? `读数 ${fmtValue(selectedReading.value, selectedReading.unit)}`
+      : '读数 —';
+  }
+}
+
+function paintFlowDots(sim, wall) {
+  const svg = $('#circ-canvas');
+  if (!svg) return;
+  let layer = svg.querySelector('#circ-flow-layer');
+  if (!layer) {
+    layer = el('g', { id: 'circ-flow-layer' });
+    svg.appendChild(layer);
+  }
+  layer.innerHTML = '';
+  const advance = wall * rtSpeed();
+  (C.model?.components || []).forEach((c) => {
+    const i = sim.flows.get(c.id);
+    if (i == null || !Number.isFinite(i) || Math.abs(i) < 1e-9) {
+      RT.phase.delete(c.id);
+      return;
+    }
+    const p0 = pinPos(c, 0);
+    const p1 = pinPos(c, c.pins - 1);
+    const len = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+    if (len < 1) return;
+    // 速度随电流增大而加快，方向由电流符号决定
+    const dir = Math.sign(i);
+    const strength = Math.max(0, Math.min(1, (Math.log10(Math.abs(i)) + 9) / 9));
+    const speed = 16 + 114 * strength;
+    let ph = RT.phase.get(c.id) || 0;
+    ph += (dir * speed * advance) / len;
+    ph -= Math.floor(ph);
+    RT.phase.set(c.id, ph);
+    for (let k = 0; k < FLOW_DOT_COUNT; k++) {
+      let t = ph + k / FLOW_DOT_COUNT;
+      t -= Math.floor(t);
+      layer.appendChild(el('circle', {
+        cx: (p0.x + (p1.x - p0.x) * t).toFixed(1),
+        cy: (p0.y + (p1.y - p0.y) * t).toFixed(1),
+        r: (2.8 + 1.4 * strength).toFixed(1),
+        opacity: (0.45 + 0.5 * strength).toFixed(2),
+        class: 'flow-dot',
+      }));
+    }
   });
 }
 
@@ -469,6 +840,9 @@ function buildPalette() {
   const input = $('#circ-search');
   if (!list || !input) return;
 
+  const collapsedGroups = new Set(
+    Object.values(ELEMENTS).map((def) => def.group || '其他'),
+  );
   const renderList = (query) => {
     const key = query.trim().toLowerCase();
     const items = Object.entries(ELEMENTS).filter(([type, def]) => {
@@ -486,15 +860,33 @@ function buildPalette() {
       if (!groups.has(g)) groups.set(g, []);
       groups.get(g).push([type, def]);
     });
-    list.innerHTML = [...groups].map(([g, rows]) => `
-      <div class="comp-group">${g}</div>
-      ${rows.map(([type, def]) => `
-        <div class="comp-item" data-type="${type}">
-          <span class="palette-bar" style="background:${def.color}"></span>
-          <span class="comp-name">${def.cn}</span>
-          <span class="comp-en">${def.en}</span>
-        </div>`).join('')}
-    `).join('');
+    list.innerHTML = [...groups].map(([group, rows]) => {
+      const collapsed = !key && collapsedGroups.has(group);
+      return `
+        <section class="comp-group-section">
+          <button class="comp-group" type="button" aria-expanded="${!collapsed}">
+            <span class="comp-group-arrow">${collapsed ? '▸' : '▾'}</span>
+            <span>${group}</span>
+            <span class="comp-group-count">${rows.length}</span>
+          </button>
+          <div class="comp-group-items${collapsed ? ' hidden' : ''}">
+            ${rows.map(([type, def]) => `
+              <div class="comp-item" data-type="${type}">
+                <span class="palette-bar" style="background:${def.color}"></span>
+                <span class="comp-name">${def.cn}</span>
+                <span class="comp-en">${def.en}</span>
+              </div>`).join('')}
+          </div>
+        </section>`;
+    }).join('');
+    list.querySelectorAll('.comp-group').forEach((button) => {
+      button.addEventListener('click', () => {
+        const group = button.querySelector('span:nth-child(2)').textContent;
+        if (collapsedGroups.has(group)) collapsedGroups.delete(group);
+        else collapsedGroups.add(group);
+        renderList(input.value);
+      });
+    });
     list.querySelectorAll('.comp-item').forEach((item) => {
       item.addEventListener('click', () => addElement(item.dataset.type));
     });
@@ -511,6 +903,7 @@ function buildPalette() {
 
 function addElement(type) {
   if (!C.model) return;
+  pausePower();
   const n = C.model.components.length;
   // 新元件默认落在格点上：横向 144、纵向 132（都是 12 的倍数），引脚随之对齐网格
   const c = createComponent(
@@ -526,8 +919,11 @@ function addElement(type) {
 
 function bindToolbar() {
   $('#circ-run')?.addEventListener('click', runCircuit);
+  $('#circ-power')?.addEventListener('click', togglePower);
+  $('#circ-speed')?.addEventListener('click', cycleSpeed);
   $('#circ-clear')?.addEventListener('click', () => {
     if (!C.model) return;
+    pausePower();
     C.model.components = [];
     C.model.nets = [];
     C.sel = null;
@@ -538,15 +934,47 @@ function bindToolbar() {
   });
   $('#circ-save')?.addEventListener('click', () => saveCircuit(false));
   $('#circ-save-as')?.addEventListener('click', () => saveCircuit(true));
-  $('#circ-open')?.addEventListener('click', listCircuitFiles);
+  $('#circ-open')?.addEventListener('click', openCircuitDialog);
   $('#circ-close')?.addEventListener('click', closeCircuit);
   $('#scope-close')?.addEventListener('click', () => $('#scope-window').classList.add('hidden'));
+  $('#circ-duration')?.addEventListener('change', updateModelSettings);
+  $('#circ-dt')?.addEventListener('change', updateModelSettings);
+  const contextMenu = $('#circ-context-menu');
+  contextMenu?.addEventListener('click', (event) => {
+    const action = event.target.closest('[data-action]')?.dataset.action;
+    const target = componentById(C.contextTarget);
+    hideElementMenu();
+    if (!target || !action) return;
+    if (action === 'edit') {
+      C.sel = { kind: 'el', id: target.id };
+      render();
+      $('#circ-props-body input')?.focus();
+    } else if (action === 'rotate') {
+      pausePower();
+      target.rot = normalizeRot((target.rot || 0) + 90);
+      C.sel = { kind: 'el', id: target.id };
+      render();
+      status(`${ELEMENTS[target.type].cn} 旋转至 ${target.rot}°`);
+    } else if (action === 'delete') {
+      pausePower();
+      C.model.components = C.model.components.filter((c) => c.id !== target.id);
+      removeComponentFromNets(target.id);
+      C.readings.delete(target.id);
+      C.sel = null;
+      render();
+      status(`已删除 ${ELEMENTS[target.type].cn}`);
+    }
+    C.contextTarget = null;
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (!contextMenu?.contains(event.target)) hideElementMenu();
+  });
 }
 
 function runCircuit() {
   if (!C.model) return;
-  C.model.duration = Number($('#circ-duration').value) || 0.01;
-  C.model.dt = Number($('#circ-dt').value) || 1e-5;
+  pausePower(); // 切回批量瞬态模式：先断电
+  updateModelSettings();
   try {
     const t0 = performance.now();
     const res = simulate(C.model);
@@ -559,9 +987,9 @@ function runCircuit() {
         subtitle: `0 – ${fmtTime(res.duration)} · ${res.dt} s/步`,
         series: res.probes,
       });
-      status(`仿真完成 ${ms} ms，${res.probes.length} 路探针`);
+      status(`${res.domain === 'signal' ? '信号仿真' : '电路仿真'}完成 ${ms} ms，${res.probes.length} 路探针`);
     } else {
-      status(`仿真完成 ${ms} ms（未放置示波器探针，仅更新表读数）`);
+      status(`${res.domain === 'signal' ? '信号仿真' : '电路仿真'}完成 ${ms} ms（未放置示波器探针，仅更新表读数）`);
     }
   } catch (e) {
     status(String(e.message || e), true);
@@ -608,27 +1036,17 @@ async function pickCircuitPath() {
   return p;
 }
 
-async function listCircuitFiles() {
-  const panel = $('#circ-open-list');
+// 通过系统文件选择器打开任意路径的 .ckt（不依赖终端 cwd）
+async function openCircuitDialog() {
   try {
-    const cwd = String(C.opts.getCwd?.() || '.');
-    const entries = await invoke('scan_directory', { path: cwd });
-    const files = (entries || []).filter((f) => !f.is_dir && /\.ckt$/i.test(f.name));
-    if (!files.length) {
-      status('当前文件夹没有 .ckt 文件', true);
+    const path = await invoke('open_file_dialog', { ext: 'ckt' });
+    if (!path) {
+      status('已取消打开');
       return;
     }
-    panel.innerHTML = '<div class="open-list-title">打开 .ckt</div>' +
-      files.map((f) => `<div class="open-list-item" data-path="${f.path}">${f.name}</div>`).join('');
-    panel.classList.remove('hidden');
-    panel.querySelectorAll('.open-list-item').forEach((it) => {
-      it.addEventListener('click', () => {
-        panel.classList.add('hidden');
-        openCircuitFile(it.dataset.path);
-      });
-    });
+    await openCircuitFile(path);
   } catch (e) {
-    status(`读取目录失败: ${e}`, true);
+    status(`打开失败: ${e}`, true);
   }
 }
 
@@ -664,6 +1082,7 @@ function connectPorts(p1, p2, bends = []) {
     status('这两个端子已经在同一网络里了');
     return;
   }
+  pausePower();
   const net = mergeNets(n1, n2);
   if (!net.ports.includes(p1)) net.ports.push(p1);
   if (!net.ports.includes(p2)) net.ports.push(p2);
@@ -692,6 +1111,7 @@ function tapNet(netId, pt) {
     return;
   }
   const own = netOfPortSafe(C.pending.port);
+  pausePower();
   const target = mergeNets(own, net);
   if (!target.ports.includes(C.pending.port)) target.ports.push(C.pending.port);
   // 接点沿导线方向吸附到格点：横线只动 x、竖线只动 y，保证留在导线上
@@ -871,6 +1291,7 @@ function bindCanvas() {
     if (element) {
       const target = componentById(element.dataset.element);
       if (!target) return;
+      pausePower();
       C.sel = { kind: 'el', id: target.id };
       C.drag = { id: target.id, dx: pt.x - target.x, dy: pt.y - target.y };
       render();
@@ -896,11 +1317,8 @@ function bindCanvas() {
     if (node) {
       const target = componentById(node.dataset.element);
       if (!target) return;
-      target.rot = normalizeRot((target.rot || 0) + 90);
       cancelPending();
-      C.sel = { kind: 'el', id: target.id };
-      render();
-      status(`${ELEMENTS[target.type].cn} 旋转至 ${target.rot}°`);
+      showElementMenu(target, e.clientX, e.clientY);
       return;
     }
     if (C.pending) {
@@ -958,6 +1376,7 @@ function bindKeys() {
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (!C.sel) return;
       e.preventDefault();
+      pausePower();
       if (C.sel.kind === 'el') {
         const id = C.sel.id;
         C.model.components = C.model.components.filter((c) => c.id !== id);
@@ -969,7 +1388,9 @@ function bindKeys() {
       C.sel = null;
       render();
     } else if (e.key === 'Escape') {
-      if (C.pending) {
+      if (!$('#circ-context-menu')?.classList.contains('hidden')) {
+        hideElementMenu();
+      } else if (C.pending) {
         cancelPending();
         status('已取消连线');
       } else {
@@ -996,3 +1417,8 @@ function fmtValue(v, unit) {
   return `${(v * 1e9).toFixed(1)} n${unit}`;
 }
 
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
