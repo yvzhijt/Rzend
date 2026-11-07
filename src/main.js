@@ -13,7 +13,7 @@ import { bindShellEvents } from './shell.js';
 import { renderWorkspace, showPlot, bindRunButton } from './yt-runner.js';
 import {
   toggleTerminal, injectLine, setOnTerminalCwd, setOnTerminalNotice,
-  setTerminalCwdChip, syncTerminalCwd,
+  setTerminalCwdChip, syncTerminalCwd, setTerminalFontSize,
 } from './terminal.js';
 
 /* ---------------- Ribbon ---------------- */
@@ -21,6 +21,7 @@ import {
 function bindRibbon() {
   bindMenus();
   bindFontMenu();
+  bindEditorFontMenu();
 
   $('#mi-open-folder')?.addEventListener('click', openFolderDialog);
   $('#mi-save')?.addEventListener('click', saveFile);
@@ -124,6 +125,37 @@ function bindFontMenu() {
 
   // 子菜单内部点击不冒泡到 document，避免触发全局 closeAll 误关菜单
   $('#font-submenu-body')?.addEventListener('click', (e) => e.stopPropagation());
+
+  let saved = 0;
+  try { saved = Number(localStorage.getItem(KEY)) || 0; } catch (_) {}
+  apply(saved);
+}
+
+// 编辑器（CodeMirror）代码字体单独调节，不影响主界面其他字号
+function bindEditorFontMenu() {
+  const BASE = 15.6;          // 编辑器默认字号（与 .cm-scroller 一致）
+  const MIN = -6, MAX = 14;   // 允许在默认值上下调节
+  const KEY = 'rzend-editor-font-delta';
+  const range = $('#font-range-editor');
+  const valueEl = $('#font-value-editor');
+  const presets = $$('#font-submenu-body-editor [data-font]');
+  const fmt = (d) => (d === 0 ? '默认' : (d > 0 ? `+${d}` : `${d}`));
+
+  const apply = (delta) => {
+    delta = Math.max(MIN, Math.min(MAX, Math.round(delta)));
+    const px = BASE + delta;
+    document.documentElement.style.setProperty('--editor-font-size', `${px.toFixed(1)}px`);
+    setTerminalFontSize(px);   // 编辑器与终端字号联动
+    if (valueEl) valueEl.textContent = fmt(delta);
+    if (range) range.value = String(delta);
+    presets.forEach((b) => b.classList.toggle('checked', Number(b.dataset.font) === delta));
+    try { localStorage.setItem(KEY, String(delta)); } catch (_) {}
+  };
+
+  if (range) range.addEventListener('input', () => apply(Number(range.value)));
+  presets.forEach((b) => b.addEventListener('click', () => apply(Number(b.dataset.font))));
+
+  $('#font-submenu-body-editor')?.addEventListener('click', (e) => e.stopPropagation());
 
   let saved = 0;
   try { saved = Number(localStorage.getItem(KEY)) || 0; } catch (_) {}

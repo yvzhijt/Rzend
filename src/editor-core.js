@@ -30,7 +30,7 @@ function languageForPath(path) {
 const editorTheme = EditorView.theme({
   '&': { backgroundColor: 'var(--bg)', color: 'var(--text)' },
   '&.cm-focused': { outline: 'none' },
-  '.cm-scroller': { fontFamily: 'var(--mono)', fontSize: '15.6px', lineHeight: '1.5' },
+  '.cm-scroller': { fontFamily: 'var(--mono)', fontSize: 'var(--editor-font-size, 15.6px)', lineHeight: '1.5' },
   '.cm-content': { padding: '8px 0', whiteSpace: 'pre' },
   '.cm-gutters': {
     backgroundColor: 'var(--bg)',

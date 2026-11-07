@@ -20,6 +20,7 @@ const SHELL_STORAGE_KEY = 'rzend.terminal.shell';
 let currentShell = null;
 
 let term = null;
+let pendingTermFontSize = 15.6;
 let fitAddon = null;
 let started = false;      // 已成功 spawn 过
 let dead = false;         // 进程已退出，下次唤出时重建
@@ -39,6 +40,14 @@ let onTerminalNotice = null; // (msg: string) => void   给 命令行 区的提�
 
 export function setOnTerminalCwd(fn) { onTerminalCwd = fn; }
 export function setOnTerminalNotice(fn) { onTerminalNotice = fn; }
+// 动态设置终端字号（与编辑器共享同一套偏移控制）
+export function setTerminalFontSize(px) {
+  pendingTermFontSize = px;
+  if (term && fitAddon) {
+    term.options.fontSize = px;
+    try { fitAddon.fit(); } catch { /* 容器尺寸为 0 时忽略 */ }
+  }
+}
 
 function shellLabel(s) {
   return s === 'pwsh' ? 'PowerShell 7' : 'PowerShell 5.1';
@@ -161,7 +170,7 @@ async function createTerm(shellArg) {
 
   term = new Terminal({
     fontFamily: 'Cascadia Mono, Consolas, "Courier New", monospace',
-    fontSize: 15.6,
+    fontSize: pendingTermFontSize,
     lineHeight: 1.2,
     cursorBlink: true,
     theme: { background: '#0c0c0c', foreground: '#e6e6e6', cursor: '#f2f2f2', selectionBackground: '#3a5a7a' },
