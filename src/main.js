@@ -1,13 +1,16 @@
 // 主界面入口：串联所有模块
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { state, $, $$, print } from './common.js';
 import { MAIN_DOCKS, bindPanelDrag, restorePanelOrder } from './panels.js';
 import {
   bindFileTree, openFolderDialog, refreshTree, updateStatus,
   doCd, bindTerminalSync, bindTerminalOps, bindFocusInput, bindWorkspaceOps,
+  hasUnsavedChanges,
 } from './services.js';
 import { bindEditor, saveFile, closeEditor } from './editor-core.js';
+import { confirmUnsavedChanges } from './dialogs.js';
 import { bindCommandLine, focusInput } from './shell.js';
 import { bindShellEvents } from './shell.js';
 import { renderWorkspace, showPlot, bindRunButton } from './yt-runner.js';
@@ -90,7 +93,7 @@ function bindMenus() {
 }
 
 function bindFontMenu() {
-  const BASE = 15.6;          // 主页面基准字号（body 的 font-size）
+  const BASE = 13;            // 主页面基准字号（body 的 font-size）
   const MIN = -10, MAX = 10;  // 允许在默认值上下 10
   const KEY = 'rzend-main-font-delta';
   const range = $('#font-range');
@@ -133,7 +136,7 @@ function bindFontMenu() {
 
 // 编辑器（CodeMirror）代码字体单独调节，不影响主界面其他字号
 function bindEditorFontMenu() {
-  const BASE = 15.6;          // 编辑器默认字号（与 .cm-scroller 一致）
+  const BASE = 14;            // 编辑器默认字号（与 .cm-scroller 一致）
   const MIN = -6, MAX = 14;   // 允许在默认值上下调节
   const KEY = 'rzend-editor-font-delta';
   const range = $('#font-range-editor');
@@ -266,6 +269,32 @@ function bindTerminalPanel() {
   $('#btn-terminal-switch')?.addEventListener('click', () => toggleTerminal(true));
 }
 
+/* ---------------- 关闭窗口前确认未保存内容 ---------------- */
+
+function bindWindowCloseGuard() {
+  const win = getCurrentWindow();
+  let confirmed = false;
+
+  win.onCloseRequested(async (event) => {
+    if (confirmed || !hasUnsavedChanges()) return;
+    event.preventDefault();
+
+    const name = state.activeFile?.split(/[/\\]/).pop();
+    const choice = await confirmUnsavedChanges(name);
+    if (choice === 'cancel') return;
+    if (choice === 'save') {
+      const saved = await saveFile();
+      if (!saved) return;
+    } else {
+      await closeEditor(true);
+    }
+
+    // 已确认可以关闭：再次 close() 时直接放行，由 onCloseRequested 的默认逻辑销毁窗口
+    confirmed = true;
+    win.close().catch((e) => console.warn('关闭窗口失败:', e));
+  }).catch((e) => console.warn('注册窗口关闭保护失败:', e));
+}
+
 /* ---------------- 初始化 ---------------- */
 
 async function init() {
@@ -283,6 +312,7 @@ async function init() {
   bindTerminalPanel();
   bindSplitters();
   bindShellEvents();
+  bindWindowCloseGuard();
   restorePanelOrder(MAIN_DOCKS);
   bindPanelDrag(MAIN_DOCKS);
 

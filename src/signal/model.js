@@ -7,7 +7,7 @@ export function uid(prefix = 's') {
 
 const GRID = 12;
 const GRID_OFFSET = 6;
-const BLOCK_TYPES = new Set(['SOURCE', 'TF', 'SUM', 'PICKOFF', 'PROBE']);
+const BLOCK_TYPES = new Set(['SOURCE', 'TF', 'SUM', 'PICKOFF', 'PROBE', 'SAMPLER', 'ZOH']);
 
 export function snapGrid(value) {
   const number = Number(value);
@@ -46,7 +46,7 @@ export function serializeSignalGraph(model) {
 
 function inputCount(block) {
   if (block.type === 'SUM') return block.signs.length;
-  if (['TF', 'PICKOFF', 'PROBE'].includes(block.type)) return 1;
+  if (['TF', 'PICKOFF', 'PROBE', 'SAMPLER', 'ZOH'].includes(block.type)) return 1;
   return 0;
 }
 

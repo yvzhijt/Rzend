@@ -1,1 +1,1 @@
-{"main-zoom":{"identifier":"main-zoom","description":"允许主窗口调用 WebView 原生缩放（字体大小设置）","local":true,"windows":["main"],"permissions":["core:webview:allow-set-webview-zoom"]}}
+{"main-zoom":{"identifier":"main-zoom","description":"允许主窗口调用 WebView 原生缩放（字体大小设置）","local":true,"windows":["main"],"permissions":["core:webview:allow-set-webview-zoom","core:event:default","core:window:default","core:window:allow-destroy"]}}

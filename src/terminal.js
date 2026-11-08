@@ -20,7 +20,7 @@ const SHELL_STORAGE_KEY = 'rzend.terminal.shell';
 let currentShell = null;
 
 let term = null;
-let pendingTermFontSize = 15.6;
+let pendingTermFontSize = 14;
 let fitAddon = null;
 let started = false;      // 已成功 spawn 过
 let dead = false;         // 进程已退出，下次唤出时重建
@@ -122,7 +122,9 @@ export function injectLine(line) {
     notify('终端正在输入，未注入命令（提交或 Ctrl+C 后重试）');
     return false;
   }
-  invoke('pty_write', { data: `${line}\r\n` })
+  // 只发送回车符：真实键盘 Enter 就是 \r；额外加 \n 会让 PowerShell 的
+  // PSReadLine 把 LF 当成多行编辑，留下多余的 “>>” 续行提示。
+  invoke('pty_write', { data: `${line}\r` })
     .catch((e) => notify(`注入终端失败: ${e}`));
   return true;
 }
@@ -173,7 +175,7 @@ async function createTerm(shellArg) {
     fontSize: pendingTermFontSize,
     lineHeight: 1.2,
     cursorBlink: true,
-    theme: { background: '#0c0c0c', foreground: '#e6e6e6', cursor: '#f2f2f2', selectionBackground: '#3a5a7a' },
+    theme: { background: '#0f1115', foreground: '#d7dee8', cursor: '#f2f2f2', selectionBackground: '#2f5580' },
   });
   fitAddon = new FitAddon();
   term.loadAddon(fitAddon);

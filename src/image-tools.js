@@ -1,8 +1,19 @@
 // 主界面：图片编辑工具（裁剪、缩放、旋转、滤镜）
 import { invoke } from '@tauri-apps/api/core';
 import { state, $, $$, print } from './common.js';
-import { setImageDimensionInputs } from './editor-core.js';
 import { refreshTree } from './services.js';
+
+// 把当前（或操作后）的尺寸写回裁剪 / 缩放输入框
+export function setImageDimensionInputs(width, height) {
+  const cropWidth = $('#image-crop-width');
+  const cropHeight = $('#image-crop-height');
+  const resizeWidth = $('#image-resize-width');
+  const resizeHeight = $('#image-resize-height');
+  if (cropWidth) cropWidth.value = String(width);
+  if (cropHeight) cropHeight.value = String(height);
+  if (resizeWidth) resizeWidth.value = String(width);
+  if (resizeHeight) resizeHeight.value = String(height);
+}
 
 async function renderEditedImage(outputPath = null, path = state.activeFile, operations = state.imageOperations.slice()) {
   const request = ++state.imageTransformSeq;

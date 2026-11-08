@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { state, $, print, esc } from './common.js';
 import { showFigure } from './figure.js';
-import { renderTree, openFile, closeEditor, saveFile, toggleTerminal, injectLine, focusInput } from './services.js';
+import { renderTree, openFile, saveFile, toggleTerminal, injectLine, focusInput, hasUnsavedChanges } from './services.js';
 
 /* ================ 工作区渲染 ================ */
 
@@ -92,28 +92,59 @@ export async function runFile(path) {
   }
 }
 
+/* ================ 运行 ================ */
+
+// PowerShell 里安全地引用路径
+function shellQuote(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+// C: gcc file.c -o file.exe; 编译成功后再运行（C++ 用 g++）
+function buildCompileRunCommand(path) {
+  const compiler = /\.c$/i.test(path) ? 'gcc' : 'g++';
+  const exe = path.replace(/\.[^.\\/]+$/, '') + '.exe';
+  return `${compiler} ${shellQuote(path)} -o ${shellQuote(exe)}; if ($LASTEXITCODE -eq 0) { & ${shellQuote(exe)} }`;
+}
+
 export async function runActiveFile() {
   if (!state.activeFile) {
     print('没有可运行的文件，请先选择 .yt 文件\n', 'cmd-err');
     return;
   }
-  if (!/\.yt$/i.test(state.activeFile)) {
-    if (state.activeFileKind === 'image') {
-      print('图片文件不能运行\n', 'cmd-info');
+  if (state.activeFileKind === 'text' && hasUnsavedChanges()) {
+    const saved = await saveFile();
+    if (!saved) {
+      print('保存失败，已取消运行\n', 'cmd-err');
       return;
     }
-    const name = state.activeFile.split(/[/\\]/).pop();
-    await toggleTerminal(true);
-    if (/\.py$/i.test(state.activeFile)) {
-      const ok = injectLine(`python "${state.activeFile}"`);
-      print(ok ? `已在终端中运行: ${name}\n` : `终端正忙，请手动运行: python "${name}"\n`, 'cmd-info');
-    } else {
-      print(`非 .yt 文件（${name}），请在终端中运行\n`, 'cmd-info');
-    }
+  }
+
+  const path = state.activeFile;
+  if (state.activeFileKind === 'image') {
+    print('图片文件不能运行\n', 'cmd-info');
     return;
   }
-  if (state.content !== state.original) await saveFile();
-  await runFile(state.activeFile);
+  if (/\.yt$/i.test(path)) {
+    await runFile(path);
+    return;
+  }
+
+  const name = path.split(/[/\\]/).pop();
+  await toggleTerminal(true);
+
+  if (/\.py$/i.test(path)) {
+    const ok = injectLine(`python ${shellQuote(path)}`);
+    print(ok ? `已在终端中运行: ${name}\n` : `终端正忙，请手动运行: python ${shellQuote(name)}\n`, 'cmd-info');
+    return;
+  }
+  if (/\.(c|cc|cpp|cxx)$/i.test(path)) {
+    const ok = injectLine(buildCompileRunCommand(path));
+    print(ok
+      ? `正在编译并运行: ${name}\n`
+      : `终端正忙，请手动编译运行: ${buildCompileRunCommand(path)}\n`, 'cmd-info');
+    return;
+  }
+  print(`该文件类型（${name}）暂不支持一键运行，请在终端中执行\n`, 'cmd-info');
 }
 
 export function bindRunButton() {

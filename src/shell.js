@@ -81,7 +81,7 @@ export async function execLine(raw) {
         const norm = (p) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
         const isAbs = /^([a-z]:[\\/]|\\\\)/i.test(arg);
         const full = isAbs ? arg : `${state.cwd}/${arg}`;
-        if (norm(state.activeFile) === norm(full)) closeEditor();
+        if (norm(state.activeFile) === norm(full)) closeEditor(true);
       }
       await refreshTree();
       return print(`${msg}\n`, 'cmd-info');

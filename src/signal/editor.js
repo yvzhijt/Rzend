@@ -8,14 +8,14 @@
  *   信号源(SOURCE)  输入，无入边，一个出边
  *   求和点(SUM)     多入一出，每个输入带 ± 符号
  *   传递函数(TF)    一入一出，s 域传递函数
- *   引出点(PICKOFF) 一入多出，信号分叉
+ *   分支点(PICKOFF) 一入多出，信号分叉（渲染为圆点连接点）
  *   示波器(PROBE)   一入无出，观测输出时域响应
  *
  * 梅森公式：T = Σ(P_k · Δ_k) / Δ
  */
 
 import { analyzeSignalGraph } from './analysis.js';
-import { simulateResponse } from './simulate.js';
+import { simulateResponse, simulateHybrid } from './simulate.js';
 import { showFigure } from '../figure.js';
 import { uid, snapGrid, snapPoint } from './model.js';
 import { createViewport } from '../zoom.js';
@@ -68,7 +68,8 @@ function blockBBox(b) {
 function nodeOutput(node) {
   if (node.type === 'SUM') return localToAbs(node, SG_W / 2 + SUM_R, SG_H / 2);
   if (node.type === 'PICKOFF') return localToAbs(node, SG_W / 2 + PICK_R, SG_H / 2);
-  if (node.type === 'SOURCE' || node.type === 'TF') return localToAbs(node, SG_W, SG_H / 2);
+  if (node.type === 'SOURCE' || node.type === 'TF'
+    || node.type === 'SAMPLER' || node.type === 'ZOH') return localToAbs(node, SG_W, SG_H / 2);
   return null;
 }
 
@@ -83,6 +84,7 @@ function nodeInput(node, index) {
   if (node.type === 'TF') return localToAbs(node, 0, SG_H / 2);
   if (node.type === 'PROBE') return localToAbs(node, SG_W / 2 - PROBE_R, SG_H / 2);
   if (node.type === 'PICKOFF') return localToAbs(node, SG_W / 2 - PICK_R, SG_H / 2);
+  if (node.type === 'SAMPLER' || node.type === 'ZOH') return localToAbs(node, 0, SG_H / 2);
   if (node.type === 'SUM') {
     const n = node.signs ? node.signs.length : 2;
     const a = sumInputAngle(index, n);
@@ -93,7 +95,8 @@ function nodeInput(node, index) {
 
 function signalInputCount(node) {
   if (node.type === 'SUM') return Math.max(2, Math.min(8, node.signs?.length || 2));
-  if (node.type === 'TF' || node.type === 'PROBE' || node.type === 'PICKOFF') return 1;
+  if (node.type === 'TF' || node.type === 'PROBE' || node.type === 'PICKOFF'
+    || node.type === 'SAMPLER' || node.type === 'ZOH') return 1;
   return 0;
 }
 
@@ -200,8 +203,9 @@ const SIGNAL_PALETTE = [
   { type: 'SOURCE', cn: '信号源', en: 'Source', group: '输入', color: '#d95319' },
   { type: 'TF', cn: '传递函数', en: 'Transfer Fcn', group: '基本', color: '#0072bd' },
   { type: 'SUM', cn: '求和点', en: 'Summing Junction', group: '基本', color: '#77ac30' },
-  { type: 'PICKOFF', cn: '引出点', en: 'Pick-off Point', group: '基本', color: '#7e2f8e' },
   { type: 'PROBE', cn: '示波器', en: 'Scope', group: '测量', color: '#edb120' },
+  { type: 'SAMPLER', cn: '采样器', en: 'Sampler', group: '离散', color: '#edb120' },
+  { type: 'ZOH', cn: '零阶保持器', en: 'Zero-Order Hold', group: '离散', color: '#edb120' },
 ];
 
 /* 信号源可选的典型输入信号 */
@@ -361,6 +365,26 @@ function renderBlock(b) {
     }
   }
 
+  // 采样器 / 零阶保持器
+  if (b.type === 'SAMPLER' || b.type === 'ZOH') {
+    g.appendChild(el('rect', {
+      x: 0, y: 0, width: SG_W, height: SG_H, rx: 5,
+      fill: sel ? 'rgba(237,177,32,0.10)' : '#fff',
+      stroke: sel || hover ? '#0072bd' : color,
+      'stroke-width': sel ? 2 : 1.5,
+    }));
+    g.appendChild(el('text', {
+      x: SG_W / 2, y: SG_H / 2 + 4, 'text-anchor': 'middle',
+      class: 'sg-label', fill: color, 'font-weight': '600',
+      transform: tRot(SG_W / 2, SG_H / 2 + 4),
+    }, b.type === 'SAMPLER' ? '采样' : 'ZOH'));
+    g.appendChild(el('text', {
+      x: SG_W / 2, y: SG_H + 10, 'text-anchor': 'middle',
+      class: 'sg-params', fill: '#7b8b9c', 'font-size': '9px',
+      transform: tRot(SG_W / 2, SG_H + 10),
+    }, b.type === 'SAMPLER' ? '连续→离散' : '离散→连续'));
+  }
+
   // 求和点（圆圈）
   if (b.type === 'SUM') {
     g.appendChild(el('circle', {
@@ -390,18 +414,14 @@ function renderBlock(b) {
     }, `${n} 路输入`));
   }
 
-  // 引出点（实心圆点）
+  // 分支点（连接点）：渲染为实心小圆点，不当作独立模块显示
   if (b.type === 'PICKOFF') {
     g.appendChild(el('circle', {
-      cx: SG_W / 2, cy: SG_H / 2, r: PICK_R,
-      fill: '#7e2f8e', stroke: sel ? '#0072bd' : '#7e2f8e',
+      cx: SG_W / 2, cy: SG_H / 2, r: 4.5,
+      fill: sel ? '#0072bd' : '#5a6268',
+      stroke: sel ? '#0072bd' : '#5a6268',
       'stroke-width': sel ? 2.5 : 1.5,
     }));
-    g.appendChild(el('text', {
-      x: SG_W / 2, y: SG_H + 10, 'text-anchor': 'middle',
-      class: 'sg-params', fill: '#7b8b9c', 'font-size': '9px',
-      transform: tRot(SG_W / 2, SG_H + 10),
-    }, '引出点'));
   }
 
   // 示波器
@@ -896,7 +916,15 @@ function renderSignalProps() {
   }
 
   if (b.type === 'PICKOFF') {
-    rows.push('<div class="prop-tip">引出点将信号无衰减地分叉到多个输出；也可直接双击信号线自动生成引出点分支</div>');
+    rows.push('<div class="prop-tip">连接点：信号在此无衰减地分叉到多条输出；双击任意信号线可自动在此处生成连接点分支</div>');
+  }
+
+  if (b.type === 'SAMPLER') {
+    rows.push('<div class="prop-tip">采样器：在采样周期 Ts 时刻对连续信号采样，得到离散序列（连续 → 离散 边界）</div>');
+  }
+
+  if (b.type === 'ZOH') {
+    rows.push('<div class="prop-tip">零阶保持器：将一个采样值在整个采样周期内保持为常值（离散 → 连续 边界）</div>');
   }
 
   if (b.type === 'PROBE') {
@@ -970,7 +998,7 @@ function startWireBranchFromWire(wireId, pt) {
   renderSignalGraph();
   updateSignalSelection();
   renderSignalProps();
-  statusSG('已自动创建引出点：点击空白可落拐点，点击目标节点完成分支（Esc 取消）');
+  statusSG('已自动创建连接点：点击空白可落拐点，点击目标节点完成分支（Esc 取消）');
 }
 
 /* 命中引脚：光标靠近引脚圆点时精确命中（Proteus 式），返回最近的一个 */
@@ -1161,7 +1189,7 @@ function bindSignalToolbar() {
       if (b?.type === 'PROBE') runSimulation();
       return;
     }
-    // 双击信号线自动创建引出点分支（连线为悬停引脚单击发起）
+    // 双击信号线自动创建连接点分支（连线为悬停引脚单击发起）
     const wireEl = e.target.closest('[data-wire]');
     if (e.detail >= 2 && wireEl) startWireBranchFromWire(wireEl.dataset.wire, toSvgSG(e));
   });
@@ -1214,6 +1242,34 @@ function bindSignalKeys() {
   });
 }
 
+function runHybridSimulation(T, Ts) {
+  const res = simulateHybrid(SG.model, { T, Ts });
+  if (res.error) { statusSG(res.error, true); return; }
+  const series = res.series || [];
+  if (!series.length) { statusSG('没有可仿真的示波器输出', true); return; }
+  const box = $('#circ-props-body');
+  if (box) {
+    const tfLines = SG.model.blocks
+      .filter((b) => b.type === 'TF')
+      .map((b) => {
+        const dom = /[zZ]/.test(`${b.params?.num || ''}${b.params?.den || ''}`) ? 'z' : 's';
+        return `<div style="margin:3px 0;font-family:var(--mono);font-size:12px">G(${dom}) = (${esc(b.params.num || '1')}) / (${esc(b.params.den || '1')})</div>`;
+      });
+    box.innerHTML = `
+      <div class="prop-head" style="color:#0072bd">采样数据系统<span class="prop-id">离散/混合仿真</span></div>
+      <div class="prop-tip" style="margin:4px 0">采样周期 Ts = ${Ts} s · 仿真时间 0 ~ ${T} s</div>
+      ${tfLines.join('') || '<div class="prop-empty">无传递函数</div>'}
+      <div class="prop-tip" style="margin-top:8px">连续块按 RK4 积分、离散块按差分方程递推；采样器/零阶保持器按 Ts 锁存与保持。响应见示波器图窗。</div>
+    `;
+  }
+  showFigure({
+    title: '示波器',
+    subtitle: `采样数据系统 Ts=${Ts}s · 0 ~ ${T}s`,
+    series,
+  });
+  statusSG(`仿真完成：${series.length} 路输出曲线（采样周期 ${Ts}s）`);
+}
+
 function runSimulation() {
   if (!SG.model || !SG.model.blocks.length) {
     statusSG('信号流图为空，请先添加节点', true);
@@ -1229,31 +1285,53 @@ function runSimulation() {
     statusSG('仿真时间必须大于 0', true);
     return;
   }
-  const sig = sourceSignal(result.source);
-
-  /* 每个示波器的时域响应 */
+  /* 含采样器/零阶保持器或 z 域模块时，走采样数据（连续+离散混合）仿真 */
+  const Ts = Number($('#sig-ts')?.value) || 1;
+  const needsHybrid = SG.model.blocks.some((b) =>
+    b.type === 'SAMPLER' || b.type === 'ZOH'
+    || (b.type === 'TF' && /[zZ]/.test(`${b.params?.num || ''}${b.params?.den || ''}`)));
+  if (needsHybrid) { runHybridSimulation(T, Ts); return; }
+  /* 每个示波器：各信号源贡献线性叠加 */
   const series = [];
   const tfLines = [];
   result.probes.forEach((p, i) => {
     const name = p.block.params?.name || `示波器${i + 1}`;
-    if (!p.tf) {
+    if (p.error) {
       tfLines.push(`<div style="margin:3px 0;font-family:var(--mono);font-size:12px">
-        <b>${esc(name)}</b>　${esc(p.error || '无法计算')}</div>`);
+        <b>${esc(name)}</b>　${esc(p.error)}</div>`);
       return;
     }
-    tfLines.push(`<div style="margin:3px 0;font-family:var(--mono);font-size:12px">
-      <b>${esc(name)}</b>　T(s) = ${esc(p.tf.text)}</div>`);
-    const r = simulateResponse(p.tf.n, p.tf.d, sig.key, T);
-    if (!r) return;
-    series.push({ name, xs: r.xs, ys: r.ys });
+    // 列出每个信号源到该示波器的传递函数，并叠加时域响应
+    const perSource = p.contributions.map((c) => {
+      const sig = sourceSignal(c.source);
+      const srcName = `源${result.sources.indexOf(c.source) + 1}`;
+      tfLines.push(`<div style="margin:3px 0;font-family:var(--mono);font-size:12px">
+        <b>${esc(name)}</b> ← ${esc(srcName)}（${esc(sig.cn)}）　T(s) = ${esc(c.tf.text)}</div>`);
+      return { sig, tf: c.tf };
+    });
+    if (!perSource.length) return;
+    let xsAll = null;
+    let ysSum = null;
+    let any = false;
+    perSource.forEach(({ sig, tf }) => {
+      const r = simulateResponse(tf.n, tf.d, sig.key, T);
+      if (!r) return;
+      if (!xsAll) { xsAll = r.xs; ysSum = r.ys.map(() => 0); }
+      for (let k = 0; k < r.ys.length; k++) ysSum[k] += r.ys[k];
+      any = true;
+    });
+    if (any) series.push({ name, xs: xsAll, ys: ysSum });
   });
 
-  /* 传递函数写入属性面板（连接完毕即唯一确定） */
+  /* 传递函数写入属性面板（多源线性叠加） */
   const box = $('#circ-props-body');
   if (box) {
+    const srcDesc = result.sources
+      .map((s, i) => `源${i + 1}: ${esc(sourceSignal(s).cn)} ${esc(sourceSignal(s).formula)}`)
+      .join(' · ');
     box.innerHTML = `
-      <div class="prop-head" style="color:#0072bd">系统传递函数<span class="prop-id">唯一确定</span></div>
-      <div class="prop-tip" style="margin:4px 0">输入：${esc(sig.cn)} ${esc(sig.formula)} · 仿真时间 0 ~ ${T} s</div>
+      <div class="prop-head" style="color:#0072bd">系统传递函数<span class="prop-id">多源叠加</span></div>
+      <div class="prop-tip" style="margin:4px 0">输入：${srcDesc} · 仿真时间 0 ~ ${T} s</div>
       ${tfLines.join('') || '<div class="prop-empty">无</div>'}
       <div class="prop-tip" style="margin-top:8px">响应曲线见示波器图窗：滚轮缩放 · 拖动平移 · 双击复位 · 单位阶跃输入下可读超调量与调节时间</div>
     `;
@@ -1263,12 +1341,15 @@ function runSimulation() {
     statusSG('没有可仿真的示波器输出', true);
     return;
   }
+  const srcDesc = result.sources
+    .map((s, i) => `源${i + 1}: ${sourceSignal(s).cn}`)
+    .join(' + ');
   showFigure({
     title: '示波器',
-    subtitle: `${sig.cn} ${sig.formula} · 0 ~ ${T}s`,
+    subtitle: `${srcDesc} · 0 ~ ${T}s`,
     series,
   });
-  statusSG(`仿真完成：${series.length} 路输出曲线`);
+  statusSG(`仿真完成：${series.length} 路输出曲线（${result.sources.length} 个信号源叠加）`);
 }
 
 /* ---------------- 外部接口 ---------------- */

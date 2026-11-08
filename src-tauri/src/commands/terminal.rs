@@ -231,7 +231,8 @@ pub fn pty_sync_cwd(state: tauri::State<'_, crate::AppState>, path: String) -> R
     let term = guard
         .as_mut()
         .ok_or_else(|| "终端未启动".to_string())?;
-    let line = format!("Set-Location -LiteralPath \"{safe}\"\r\n");
+    // 只写 \r（Enter 键），不要附带 \n，否则 PowerShell 会多出 “>>” 续行提示
+    let line = format!("Set-Location -LiteralPath \"{safe}\"\r");
     term.writer
         .write_all(line.as_bytes())
         .map_err(|e| format!("写入终端失败: {e}"))?;

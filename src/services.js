@@ -204,20 +204,25 @@ function setTerminalCwdChip(path) { _setTerminalCwdChip(path); }
 /* ---------------- 编辑器操作（由 editor-core.js 注入） ---------------- */
 
 let _openFile = async () => {};
-let _closeEditor = () => {};
-let _saveFile = async () => {};
+let _closeEditor = async () => true;
+let _saveFile = async () => false;
 let _setEditorDocument = () => {};
+let _hasUnsavedChanges = () => false;
 
-export function bindEditorOps({ openFile, closeEditor, saveFile, setEditorDocument }) {
+export function bindEditorOps({
+  openFile, closeEditor, saveFile, setEditorDocument, hasUnsavedChanges,
+}) {
   _openFile = openFile;
   _closeEditor = closeEditor;
   _saveFile = saveFile;
   _setEditorDocument = setEditorDocument;
+  if (hasUnsavedChanges) _hasUnsavedChanges = hasUnsavedChanges;
 }
 
 export async function openFile(path) { return _openFile(path); }
-export function closeEditor() { return _closeEditor(); }
+export function closeEditor(force = false) { return _closeEditor(force); }
 export async function saveFile() { return _saveFile(); }
+export function hasUnsavedChanges() { return _hasUnsavedChanges(); }
 
 /* ---------------- 终端操作（由 terminal.js 注入） ---------------- */
 

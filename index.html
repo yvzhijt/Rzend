@@ -10,6 +10,10 @@
   <div id="app">
     <!-- 顶部菜单栏 -->
     <div id="ribbon">
+      <div class="ribbon-brand" title="Rzend IDE">
+        <span class="brand-mark">R</span>
+        <span class="brand-name">Rzend</span>
+      </div>
       <div class="menu-bar">
         <!-- 文件 -->
         <div class="menu" id="menu-file">
@@ -79,7 +83,7 @@
         </div>
       </div>
       <div class="ribbon-right">
-        <span class="ribbon-title">Rzend</span>
+        <span class="ribbon-version">v0.2.0</span>
       </div>
     </div>
 
@@ -107,11 +111,20 @@
           <div id="editor-toolbar">
             <span class="panel-drag" title="拖动以移动面板">⠿</span>
             <span id="editor-filename"></span>
-            <span id="editor-modified" class="hidden">● 已修改</span>
+            <span id="editor-lang" class="editor-lang hidden"></span>
+            <span id="editor-modified" class="hidden">已修改</span>
             <div class="editor-toolbar-actions">
-              <button id="btn-save-file" class="toolbar-btn" title="保存 (Ctrl+S)">💾 保存</button>
-              <button id="btn-run-file" class="toolbar-btn" title="仅运行 .yt 文件">▶ 运行</button>
-              <button id="btn-close-file" class="toolbar-btn" title="关闭">✕</button>
+              <button id="btn-save-file" class="toolbar-btn" title="保存 (Ctrl+S)">
+                <svg class="btn-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h7.4L13.5 5.6v7.9H3z"/><path d="M5.5 2.5V6h5V2.5"/><path d="M5.5 13.5V9.5h5v4"/></svg>
+                保存
+              </button>
+              <button id="btn-run-file" class="toolbar-btn" title="运行当前文件（.yt / .py / C / C++）">
+                <svg class="btn-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3.2l8 4.8-8 4.8z" fill="currentColor" stroke="none"/></svg>
+                运行
+              </button>
+              <button id="btn-close-file" class="toolbar-btn icon-only" title="关闭 (Ctrl+W)">
+                <svg class="btn-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+              </button>
             </div>
           </div>
           <div class="editor-container">
@@ -151,7 +164,7 @@
             </div>
           </div>
         </div>
-        <div class="splitter-v" id="split-editor"></div>
+        <div class="splitter-v hidden" id="split-editor"></div>
 
         <!-- 底部堆叠区：命令行与终端相互覆盖，共用同一块区域 -->
         <div id="bottom-stack">
@@ -161,7 +174,9 @@
             <span class="cmd-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>命令行窗口</span>
             <div class="cmd-actions">
               <button class="panel-icon-btn" id="btn-terminal-switch" title="切换到终端 (cmd / 反引号)">⌨</button>
-              <button class="panel-icon-btn" id="btn-clear-cmd" title="清空命令行 (clc)">🗑</button>
+              <button class="panel-icon-btn" id="btn-clear-cmd" title="清空命令行 (clc)">
+                <svg class="btn-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 4.5h9.6M6.2 4.5V3.2h3.6v1.3M4.8 4.5l.5 8h5.4l.5-8M6.6 6.8v3.6M9.4 6.8v3.6"/></svg>
+              </button>
             </div>
           </div>
           <div id="cmd-scroll">
@@ -194,7 +209,9 @@
         <div class="panel-header">
           <span class="panel-title"><span class="panel-drag" title="拖动以移动面板">⠿</span>工作区</span>
           <div class="panel-actions">
-            <button class="panel-icon-btn" id="btn-clear-workspace" title="清空工作区 (clear)">🗑</button>
+            <button class="panel-icon-btn" id="btn-clear-workspace" title="清空工作区 (clear)">
+              <svg class="btn-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 4.5h9.6M6.2 4.5V3.2h3.6v1.3M4.8 4.5l.5 8h5.4l.5-8M6.6 6.8v3.6M9.4 6.8v3.6"/></svg>
+            </button>
           </div>
         </div>
         <div id="workspace-content">
@@ -218,6 +235,22 @@
     </div>
 
 
+
+    <!-- 未保存更改确认框 -->
+    <dialog id="unsaved-dialog" aria-labelledby="unsaved-title">
+      <div class="dialog-head">
+        <span class="dialog-icon" aria-hidden="true">!</span>
+        <div>
+          <div id="unsaved-title" class="dialog-title">未保存的更改</div>
+          <div id="unsaved-message" class="dialog-message"></div>
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button id="unsaved-cancel" class="dialog-btn" type="button">取消</button>
+        <button id="unsaved-discard" class="dialog-btn danger" type="button">不保存</button>
+        <button id="unsaved-save" class="dialog-btn primary" type="button" autofocus>保存</button>
+      </div>
+    </dialog>
 
     <!-- 状态栏 -->
     <div id="statusbar">
