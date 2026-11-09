@@ -15,8 +15,10 @@
  */
 
 import { analyzeSignalGraph } from './analysis.js';
-import { simulateResponse, simulateHybrid } from './simulate.js';
-import { showFigure } from '../figure.js';
+import { simulateResponse, simulateHybrid, parseZPair, checkSourceExpr } from './simulate.js';
+import { showFigure, showBode } from '../figure.js';
+import { bodeResponse, stabilityFromDen, polyRoots, formatComplex } from './freq.js';
+import { c2d, zStability } from './discrete.js';
 import { uid, snapGrid, snapPoint } from './model.js';
 import { createViewport } from '../zoom.js';
 
@@ -73,11 +75,12 @@ function nodeOutput(node) {
   return null;
 }
 
-/* 求和点输入端口在左侧圆弧上的角度（从 120° 到 240° 分布） */
-function sumInputAngle(i, n) {
-  if (n <= 1) return Math.PI;
-  const spread = (Math.PI * 2) / 3;
-  return Math.PI - spread / 2 + (spread * i) / (n - 1);
+/* 求和点四个方向端口（局部坐标，圆心在 SG_W/2, SG_H/2，半径 SUM_R）：
+ *   0 左(输入)  1 上(输入)  2 下(输入)  输出恒在右 */
+function sumPortOffset(index) {
+  if (index === 1) return { x: 0, y: -SUM_R };        // 上
+  if (index === 2) return { x: 0, y: SUM_R };          // 下
+  return { x: -SUM_R, y: 0 };                          // 左（默认）
 }
 
 function nodeInput(node, index) {
@@ -86,81 +89,80 @@ function nodeInput(node, index) {
   if (node.type === 'PICKOFF') return localToAbs(node, SG_W / 2 - PICK_R, SG_H / 2);
   if (node.type === 'SAMPLER' || node.type === 'ZOH') return localToAbs(node, 0, SG_H / 2);
   if (node.type === 'SUM') {
-    const n = node.signs ? node.signs.length : 2;
-    const a = sumInputAngle(index, n);
-    return localToAbs(node, SG_W / 2 + SUM_R * Math.cos(a), SG_H / 2 - SUM_R * Math.sin(a));
+    const o = sumPortOffset(index);
+    return localToAbs(node, SG_W / 2 + o.x, SG_H / 2 + o.y);
   }
   return null;
 }
 
 function signalInputCount(node) {
-  if (node.type === 'SUM') return Math.max(2, Math.min(8, node.signs?.length || 2));
+  if (node.type === 'SUM') return Math.max(2, Math.min(3, node.signs?.length || 3));
   if (node.type === 'TF' || node.type === 'PROBE' || node.type === 'PICKOFF'
     || node.type === 'SAMPLER' || node.type === 'ZOH') return 1;
   return 0;
 }
 
-/* ---------------- 正交路由（移植自电路模块） ---------------- */
+/* ---------------- 连线路由 ---------------- */
 
-// 出线方向一律向右，入线方向一律向左
-const OUT_DIR = { x: 1, y: 0 };
+// 入线默认方向向左（求和点上/下端口例外，见 inputDir）
 const IN_DIR = { x: -1, y: 0 };
 
-/* 正交路由：两端都横走时中点竖折，中点吸附格点，保证整条线严格横平竖直 */
-function orthoRoute(p, q, dp, dq) {
-  if (Math.abs(p.y - q.y) < 0.5 || Math.abs(p.x - q.x) < 0.5) return [p, q];
-  const pH = !!(dp && dp.x);
-  const pV = !!(dp && dp.y);
-  const qH = !!(dq && dq.x);
-  const qV = !!(dq && dq.y);
-  if (pH && qH) {
-    const mx = snapGrid((p.x + q.x) / 2);
-    return [p, { x: mx, y: p.y }, { x: mx, y: q.y }, q];
+/* 网格吸附 + 轴向软对齐：先把光标吸附到网格点，再相对上一固定点判断方向。
+ * 接近水平(±12°)时对齐水平、接近垂直时对齐垂直，其余角度保留自由斜线，
+ * 因此既整齐美观，又不会强制锁定走向。 */
+const AXIS_TOL_DEG = 12;
+function snapCursor(anchor, raw) {
+  const p = snapPoint(raw);
+  if (!anchor) return p;
+  const dx = p.x - anchor.x, dy = p.y - anchor.y;
+  const adx = Math.abs(dx), ady = Math.abs(dy);
+  if (adx < 6 && ady < 6) return p;
+  const deg = Math.atan2(ady, adx) * 180 / Math.PI;
+  if (deg <= AXIS_TOL_DEG && adx >= 6) return { x: p.x, y: anchor.y };
+  if (deg >= 90 - AXIS_TOL_DEG && ady >= 6) return { x: anchor.x, y: p.y };
+  return p;
+}
+
+/* 仅"未落下任何固定点"时使用的温和正交路由：自动生成折点保持横平竖直。
+ * 一旦用户落下固定点，连线完全按用户锚点直连（允许斜线），不再插入任何折点。 */
+function autoOrthoPts(p, q, dq) {
+  const EPS = 0.5;
+  if (Math.abs(p.y - q.y) < EPS || Math.abs(p.x - q.x) < EPS) return [p, q];
+  const qH = !!(dq && Math.abs(dq.x) > 0);
+  const qV = !!(dq && Math.abs(dq.y) > 0);
+  if (qV) return [p, { x: q.x, y: p.y }, q];       // 末端竖向进入求和点的上/下端口
+  if (qH && q.x < p.x - 2) {                       // 目标在左：先向右逃逸再绕回
+    const xj = snapGrid(Math.max(p.x, q.x) + 20);
+    return [p, { x: xj, y: p.y }, { x: xj, y: q.y }, q];
   }
-  if (pV && qV) {
-    const my = snapGrid((p.y + q.y) / 2);
-    return [p, { x: p.x, y: my }, { x: q.x, y: my }, q];
-  }
-  if (pH || qV) return [p, { x: q.x, y: p.y }, q];
-  if (pV || qH) return [p, { x: p.x, y: q.y }, q];
   const mx = snapGrid((p.x + q.x) / 2);
   return [p, { x: mx, y: p.y }, { x: mx, y: q.y }, q];
 }
 
-/* 依次把一串锚点用正交折线连接起来 */
-function routeChain(pts, dirs) {
-  if (pts.length < 2) return pts.slice();
-  const out = [pts[0]];
-  for (let i = 1; i < pts.length; i++) {
-    orthoRoute(pts[i - 1], pts[i], dirs[i - 1], dirs[i])
-      .slice(1)
-      .forEach((p) => out.push(p));
-  }
-  return out;
+/* 统一的点列生成：预览与最终连线共用，保证所见即所得。
+ * bends 为用户点击落下的固定点；有固定点时完全按锚点直连，不再强制走向。 */
+function buildWirePoints(p0, bends, end, endDir) {
+  if (!end) return [p0, ...bends];
+  if (bends.length) return [p0, ...bends, end];
+  return autoOrthoPts(p0, end, endDir);
 }
 
+/* 折线路径：使用 L 以支持任意方向线段（斜线不再被强制画成水平/竖直） */
 function polylineD(pts) {
   if (pts.length < 2) return '';
   let d = `M ${pts[0].x} ${pts[0].y}`;
-  for (let i = 1; i < pts.length; i++) {
-    const a = pts[i - 1];
-    const b = pts[i];
-    if (Math.abs(a.y - b.y) < 0.5) d += ` H ${b.x}`;
-    else d += ` V ${b.y}`;
-  }
+  for (let i = 1; i < pts.length; i++) d += ` L ${pts[i].x} ${pts[i].y}`;
   return d;
 }
 
-/* 连线折线：起点引脚 → 拐点(via) → 终点引脚，全部正交 */
+/* 连线折线：起点引脚 → 用户固定点(via) → 终点引脚 */
 function wirePolyline(w, fromBlock, toBlock) {
   const p0 = nodeOutput(fromBlock);
   const portIdx = Number(/^in(\d+)$/.exec(w.to.port || 'in0')?.[1] ?? 0);
   const p1 = nodeInput(toBlock, portIdx);
   if (!p0 || !p1) return [];
-  const via = (w.via || []).map((p) => ({ x: p.x, y: p.y }));
-  const pts = [p0, ...via, p1];
-  const dirs = [OUT_DIR, ...via.map(() => null), IN_DIR];
-  return routeChain(pts, dirs);
+  const bends = (w.via || []).map((p) => ({ x: p.x, y: p.y }));
+  return buildWirePoints(p0, bends, p1, inputDir(toBlock, portIdx));
 }
 
 /* ---------------- 信号流图状态 ---------------- */
@@ -172,7 +174,7 @@ const SG = {
   selSet: [],         // 框选/整体移动时的多选集合（block id）
   dragging: null,     // 'marquee' 表示正在框选
   marquee: null,      // { x0, y0, x1, y1, wireId }
-  pending: null,      // { fromBlock, fromPort, bends: [] }
+  pending: null,      // { fromBlock, fromPort, bends: [], releaseFinish }
   cursor: null,
   snap: null,         // 连线中吸附到的目标端口 { block, portIdx, x, y }
   hover: null,
@@ -203,6 +205,7 @@ const SIGNAL_PALETTE = [
   { type: 'SOURCE', cn: '信号源', en: 'Source', group: '输入', color: '#d95319' },
   { type: 'TF', cn: '传递函数', en: 'Transfer Fcn', group: '基本', color: '#0072bd' },
   { type: 'SUM', cn: '求和点', en: 'Summing Junction', group: '基本', color: '#77ac30' },
+  { type: 'PID', cn: 'PID 控制器', en: 'Discrete PID', group: '控制', color: '#8e44ad' },
   { type: 'PROBE', cn: '示波器', en: 'Scope', group: '测量', color: '#edb120' },
   { type: 'SAMPLER', cn: '采样器', en: 'Sampler', group: '离散', color: '#edb120' },
   { type: 'ZOH', cn: '零阶保持器', en: 'Zero-Order Hold', group: '离散', color: '#edb120' },
@@ -214,10 +217,13 @@ const SOURCE_SIGNALS = [
   { key: 'step', cn: '单位阶跃', formula: '1(t)' },
   { key: 'ramp', cn: '单位速度', formula: 't' },
   { key: 'para', cn: '单位加速度', formula: 't²/2' },
+  { key: 'expr', cn: '自定义表达式', formula: 'f(t)' },
 ];
 
 function sourceSignal(b) {
-  return SOURCE_SIGNALS.find((s) => s.key === (b.params?.sig || 'step')) || SOURCE_SIGNALS[1];
+  const s = SOURCE_SIGNALS.find((x) => x.key === (b.params?.sig || 'step')) || SOURCE_SIGNALS[1];
+  if (s.key === 'expr') return { ...s, formula: b.params?.expr || 'sin(t)' };
+  return s;
 }
 
 function buildSignalPalette() {
@@ -281,8 +287,9 @@ function addSignalBlock(type) {
     x, y,
     params: type === 'TF' ? { num: '1', den: 's + 1' }
       : type === 'SOURCE' ? { sig: 'step' }
+      : type === 'PID' ? { kp: '1', ki: '0', kd: '0', umax: '0' }
       : type === 'PROBE' ? { name: nextProbeName() } : {},
-    signs: type === 'SUM' ? [1, 1] : [],
+    signs: type === 'SUM' ? [1, 1, 1] : [],
   };
   SG.model.blocks.push(block);
   SG.sel = { kind: 'block', id: block.id };
@@ -333,14 +340,14 @@ function renderBlock(b) {
   const tRot = (x, y) => (rot ? `rotate(${-rot} ${x} ${y})` : null);
 
   // 方块
-  if (b.type === 'TF' || b.type === 'SOURCE') {
+  if (b.type === 'TF' || b.type === 'SOURCE' || b.type === 'PID') {
     g.appendChild(el('rect', {
       x: 0, y: 0, width: SG_W, height: SG_H, rx: 5,
-      fill: sel ? 'rgba(0,114,189,0.08)' : '#fff',
+      fill: sel ? 'rgba(142,68,173,0.08)' : '#fff',
       stroke: sel || hover ? '#0072bd' : color,
       'stroke-width': sel ? 2 : 1.5,
     }));
-    let label = b.type === 'SOURCE' ? sourceSignal(b).cn : 'G(s)';
+    let label = b.type === 'SOURCE' ? sourceSignal(b).cn : (b.type === 'PID' ? 'PID' : 'G(s)');
     g.appendChild(el('text', {
       x: SG_W / 2, y: SG_H / 2 + 4, 'text-anchor': 'middle',
       class: 'sg-label', fill: color, 'font-weight': '600',
@@ -355,6 +362,13 @@ function renderBlock(b) {
           transform: tRot(SG_W / 2, SG_H + 10),
         }, gain));
       }
+    }
+    if (b.type === 'PID') {
+      g.appendChild(el('text', {
+        x: SG_W / 2, y: SG_H + 10, 'text-anchor': 'middle',
+        class: 'sg-params', fill: '#7b8b9c', 'font-size': '9px',
+        transform: tRot(SG_W / 2, SG_H + 10),
+      }, `Kp=${b.params?.kp || '0'}`));
     }
     if (b.type === 'SOURCE') {
       g.appendChild(el('text', {
@@ -385,7 +399,7 @@ function renderBlock(b) {
     }, b.type === 'SAMPLER' ? '连续→离散' : '离散→连续'));
   }
 
-  // 求和点（圆圈）
+  // 求和点（圆圈，左/上/下为输入、右为输出，共四个方向端口）
   if (b.type === 'SUM') {
     g.appendChild(el('circle', {
       cx: SG_W / 2, cy: SG_H / 2, r: SUM_R,
@@ -393,25 +407,32 @@ function renderBlock(b) {
       stroke: sel || hover ? '#0072bd' : color,
       'stroke-width': sel ? 2.5 : 1.5,
     }));
-    // ± 符号标在各输入端口旁
-    const signs = b.signs || [1, 1];
-    const n = signs.length;
-    for (let i = 0; i < n; i++) {
-      const a = sumInputAngle(i, n);
-      const lx = SG_W / 2 + (SUM_R + 13) * Math.cos(a);
-      const ly = SG_H / 2 - (SUM_R + 13) * Math.sin(a);
-      g.appendChild(el('text', {
-        x: lx, y: ly + 5, 'text-anchor': 'middle',
-        class: 'sg-sum-sign', fill: signs[i] >= 0 ? '#77ac30' : '#d95319',
-        'font-size': '14px', 'font-weight': 'bold',
-        transform: tRot(lx, ly + 5),
-      }, signs[i] >= 0 ? '+' : '−'));
-    }
-    g.appendChild(el('text', {
-      x: SG_W / 2, y: SG_H + 10, 'text-anchor': 'middle',
-      class: 'sg-params', fill: '#7b8b9c', 'font-size': '9px',
-      transform: tRot(SG_W / 2, SG_H + 10),
-    }, `${n} 路输入`));
+    const signs = b.signs || [1, 1, 1];
+    const ports = [
+      { i: 0, x: SG_W / 2 - SUM_R, y: SG_H / 2, sign: signs[0] },   // 左 输入
+      { i: 1, x: SG_W / 2, y: SG_H / 2 - SUM_R, sign: signs[1] },   // 上 输入
+      { i: 2, x: SG_W / 2, y: SG_H / 2 + SUM_R, sign: signs[2] },   // 下 输入
+      { i: -1, x: SG_W / 2 + SUM_R, y: SG_H / 2, sign: null },      // 右 输出
+    ];
+    ports.forEach((p) => {
+      // 端口小圆点
+      g.appendChild(el('circle', {
+        cx: p.x, cy: p.y, r: 3.2, fill: '#fff', stroke: color, 'stroke-width': 1.4,
+      }));
+      // 输入端的 ± 符号标在端口内侧
+      if (p.sign != null) {
+        const dx = Math.sign(p.x - SG_W / 2);
+        const dy = Math.sign(p.y - SG_H / 2);
+        const sx = p.x - dx * (SUM_R - 5);
+        const sy = p.y - dy * (SUM_R - 5);
+        g.appendChild(el('text', {
+          x: sx, y: sy + 4, 'text-anchor': 'middle',
+          class: 'sg-sum-sign', fill: p.sign >= 0 ? '#77ac30' : '#d95319',
+          'font-size': '13px', 'font-weight': 'bold',
+          transform: tRot(sx, sy + 4),
+        }, p.sign >= 0 ? '+' : '−'));
+      }
+    });
   }
 
   // 分支点（连接点）：渲染为实心小圆点，不当作独立模块显示
@@ -527,28 +548,26 @@ function bindSignalCanvas() {
     if (!SG.model) return;
     if (e.button === 2) return;
 
-    // 连线中（参照电路交互）：点击目标节点完成，点击信号线取消，点击空白落拐点
+    // 连线中：点击目标节点完成；其余位置一律落下固定点（拐弯），线条继续跟随鼠标。
     if (SG.pending) {
       const pt = toSvgSG(e);
       const target = portAt(pt);
-      if (target) {
-        finishSignalWire(target.block.id);
+      if (target && target.block.id !== SG.pending.fromBlock) {
+        finishSignalWire(target.block.id, target.portIdx);
         return;
       }
-      if (e.target.closest('[data-wire]')) {
-        cancelSignalPending();
-        statusSG('已取消连线');
-        return;
-      }
-      if (!e.target.closest('[data-block]')) {
-        // 空白处：按吸附格点落一个拐点，继续连线
-        const sp = snapPoint(pt);
-        SG.pending.bends.push(sp);
+      const anchor = lastWireAnchor();
+      if (anchor) {
+        const sp = snapCursor(anchor, pt);
+        // 与上一固定点重合时不重复落点
+        const last = SG.pending.bends[SG.pending.bends.length - 1];
+        if (!last || Math.hypot(sp.x - last.x, sp.y - last.y) >= 1) SG.pending.bends.push(sp);
+        // 这次点击已按"落固定点"处理，松手时不要再当作拖拽完成
+        SG.pending.releaseFinish = false;
         SG.cursor = sp;
         SG.snap = null;
-        renderSignalGraph();
         updateSignalPreview();
-        statusSG(`已落第 ${SG.pending.bends.length} 个拐点，点击目标节点完成（Esc 取消）`);
+        statusSG(`已落第 ${SG.pending.bends.length} 个固定点：继续点击可再拐弯，点击目标节点完成（右键 / Esc 取消）`);
       }
       return;
     }
@@ -594,8 +613,17 @@ function bindSignalCanvas() {
   });
 
   svg.addEventListener('contextmenu', (e) => {
-    if (!SG.model) return;
     e.preventDefault();
+    if (!SG.model) return;
+    // 连线中：右键取消（Esc 快捷键仍保留）
+    if (SG.pending) {
+      SG.drag = null;
+      SG.dragging = null;
+      SG.marquee = null;
+      cancelSignalPending();
+      statusSG('已取消连线（右键）');
+      return;
+    }
     const blockEl = e.target.closest('[data-block]');
     if (blockEl) {
       const b = SG.model.blocks.find((b) => b.id === blockEl.dataset.block);
@@ -616,21 +644,32 @@ function bindSignalCanvas() {
         SG.drag.moved = true;
       }
       const pt = toSvgSG(e);
-      if (SG.drag.ids && SG.drag.ids.length > 1) {
+      const ids = (SG.drag.ids && SG.drag.ids.length > 1) ? SG.drag.ids : [SG.drag.id];
+      if (ids.length > 1) {
         const sdx = snapGrid(pt.x - SG.drag.startWX);
         const sdy = snapGrid(pt.y - SG.drag.startWY);
         const ddx = sdx - SG.drag.lastDx, ddy = sdy - SG.drag.lastDy;
         if (ddx || ddy) {
-          moveBlocks(SG.drag.ids, ddx, ddy);
+          moveBlocks(ids, ddx, ddy);
           SG.drag.lastDx = sdx; SG.drag.lastDy = sdy;
-          renderSignalGraph();
+          ids.forEach((id) => {
+            const b = SG.model.blocks.find((x) => x.id === id);
+            if (b) updateBlockTransform(b);
+          });
+          renderSignalWiresOnly();
         }
       } else {
         const b = SG.model.blocks.find((x) => x.id === SG.drag.id);
         if (!b) return;
-        b.x = snapGrid(pt.x - SG.drag.dx);
-        b.y = snapGrid(pt.y - SG.drag.dy);
-        renderSignalGraph();
+        const nx = snapGrid(pt.x - SG.drag.dx);
+        const ny = snapGrid(pt.y - SG.drag.dy);
+        const ddx = nx - b.x, ddy = ny - b.y;
+        if (ddx || ddy) {
+          b.x = nx; b.y = ny;
+          shiftAttachedWireVias(new Set([b.id]), ddx, ddy);
+          updateBlockTransform(b);
+          renderSignalWiresOnly();
+        }
       }
       return;
     }
@@ -640,12 +679,15 @@ function bindSignalCanvas() {
       drawMarqueeSG(SG.marquee);
       return;
     }
-    // 连线中：端口吸附 + 正交预览线
+    // 连线中：线条末端跟随鼠标；优先吸附目标端口，否则网格吸附 + 轴向软对齐
     if (SG.pending) {
       svg.style.cursor = 'crosshair';
       const raw = toSvgSG(e);
-      SG.snap = portAt(raw);
-      SG.cursor = SG.snap ? { x: SG.snap.x, y: SG.snap.y } : snapPoint(raw);
+      const hit = portAt(raw);
+      SG.snap = (hit && hit.block.id !== SG.pending.fromBlock) ? hit : null;
+      SG.cursor = SG.snap
+        ? { x: SG.snap.x, y: SG.snap.y }
+        : snapCursor(lastWireAnchor(), raw);
       updateSignalPreview();
       return;
     }
@@ -670,6 +712,7 @@ function bindSignalCanvas() {
   });
 
   window.addEventListener('pointerup', (e) => {
+    if (e.button === 2) return;   // 右键用于取消连线，不触发松手完成
     if (SG.drag) {
       const moved = SG.drag.moved;
       SG.drag = null;
@@ -695,11 +738,13 @@ function bindSignalCanvas() {
       renderSignalProps();
       return;
     }
-    // 拖线松手：落在其他节点的引脚上即完成连线（Proteus 式拖拽连线）
-    if (SG.pending) {
-      const hit = portHitAt(toSvgSG(e));
+    // 仅"从输出引脚按住拖到目标松手"这条手势才在松手时完成；
+    // 已经点击落过固定点的手势由点击决定，松手不重复完成。
+    if (SG.pending && SG.pending.releaseFinish) {
+      const pt = toSvgSG(e);
+      const hit = portHitAt(pt) || portAt(pt);
       if (hit && hit.block.id !== SG.pending.fromBlock) {
-        finishSignalWire(hit.block.id);
+        finishSignalWire(hit.block.id, hit.portIdx);
       }
     }
   });
@@ -743,17 +788,50 @@ function drawMarqueeSG(m) {
   }));
 }
 
-// 整体移动一组节点，并同步平移相连信号线的绝对拐点（via）
+/* 平移与被移动节点相连的连线拐点：
+ *   - 线的两端都在移动组内 → 整条线的拐点一起平移（整体搬家，形状不变）；
+ *   - 只有一端在移动组内 → 只平移靠近该端的那个拐点，避免把整条线拉歪。 */
+function shiftAttachedWireVias(idset, dx, dy) {
+  if ((!dx && !dy) || !SG.model) return;
+  SG.model.wires.forEach((w) => {
+    const via = w.via;
+    if (!Array.isArray(via) || !via.length) return;
+    const fromMoved = idset.has(w.from.block);
+    const toMoved = idset.has(w.to.block);
+    if (!fromMoved && !toMoved) return;
+    if (fromMoved && toMoved) {
+      w.via = via.map((v) => ({ x: v.x + dx, y: v.y + dy }));
+      return;
+    }
+    const i = fromMoved ? 0 : via.length - 1;
+    via[i] = { x: via[i].x + dx, y: via[i].y + dy };
+  });
+}
+
+// 整体移动一组节点，并同步平移相连信号线的拐点
 function moveBlocks(ids, ddx, ddy) {
   const idset = new Set(ids);
   ids.forEach((id) => {
     const b = SG.model.blocks.find((x) => x.id === id);
     if (b) { b.x += ddx; b.y += ddy; }
   });
-  SG.model.wires.forEach((w) => {
-    if (!idset.has(w.from.block) && !idset.has(w.to.block)) return;
-    if (w.via) w.via.forEach((v) => { v.x += ddx; v.y += ddy; });
-  });
+  shiftAttachedWireVias(idset, ddx, ddy);
+}
+
+/* 拖动过程中的轻量重绘：只更新被拖节点的 transform 与连线层，
+ * 不重建全部节点 DOM，连线端点实时跟随且无闪烁。松开时再全量重绘。 */
+function renderSignalWiresOnly() {
+  const wireLayer = $('#signal-wires-layer');
+  if (!wireLayer || !SG.model) return;
+  wireLayer.innerHTML = '';
+  SG.model.wires.forEach((w) => wireLayer.appendChild(renderWire(w)));
+}
+
+function updateBlockTransform(b) {
+  const g = document.querySelector(`#signal-elements-layer [data-block="${b.id}"]`);
+  if (!g) return;
+  const rot = nodeRot(b);
+  g.setAttribute('transform', `translate(${b.x},${b.y})${rot ? ` rotate(${rot} ${SG_W / 2} ${SG_H / 2})` : ''}`);
 }
 
 /* ---------------- 右键菜单 ---------------- */
@@ -766,6 +844,7 @@ function showSignalMenu(block, cx, cy) {
   let html = '';
   if (block.type === 'TF') {
     html += '<button type="button" role="menuitem" data-action="edit-tf">编辑传递函数</button>';
+    html += '<button type="button" role="menuitem" data-action="tf-c2d">离散化 (c2d·ZOH)</button>';
   }
   if (block.type === 'SOURCE') {
     const cur = sourceSignal(block).key;
@@ -796,6 +875,8 @@ function showSignalMenu(block, cx, cy) {
         deleteSignalBlock(sel.id);
       } else if (btn.dataset.action === 'edit-tf') {
         editTransferFunction(sel);
+      } else if (btn.dataset.action === 'tf-c2d') {
+        discretizeTF(sel);
       } else if (btn.dataset.action === 'set-sig') {
         sel.params = sel.params || {};
         sel.params.sig = btn.dataset.sig;
@@ -808,8 +889,8 @@ function showSignalMenu(block, cx, cy) {
         renderSignalProps();
         statusSG(`已旋转到 ${sel.rot}°`);
       } else if (btn.dataset.action === 'add-input') {
-        if (sel.signs.length >= 8) {
-          statusSG('求和点最多支持 8 个输入端', true);
+        if (sel.signs.length >= 3) {
+          statusSG('求和点最多支持 3 个输入端（左 / 上 / 下）', true);
           return;
         }
         sel.signs.push(1);
@@ -870,6 +951,31 @@ function editTransferFunction(block) {
   statusSG(`传递函数已更新：${block.params.num} / ${block.params.den}`);
 }
 
+/* 将连续 TF 按当前 Ts 零阶保持离散化为 z 域传函 */
+function discretizeTF(block) {
+  if (block.type !== 'TF') return;
+  const Ts = Number($('#sig-ts')?.value) || 1;
+  const parsed = parseZPair(block.params.num, block.params.den);
+  if (!parsed || parsed.num.every((v) => Math.abs(v) < 1e-15) || parsed.den.every((v) => Math.abs(v) < 1e-15)) {
+    statusSG('传递函数解析失败，无法离散化', true);
+    return;
+  }
+  if (/[zZ]/.test(`${block.params.num}${block.params.den}`)) {
+    statusSG('该传函已是 z 域，无需离散化', true);
+    return;
+  }
+  const r = c2d(parsed.num, parsed.den, Ts);
+  if (!r) {
+    statusSG('离散化失败（阶次不足或非真分式）', true);
+    return;
+  }
+  block.params.num = r.num;
+  block.params.den = r.den;
+  renderSignalGraph();
+  renderSignalProps();
+  statusSG(`已离散化为 z 域传函（Ts=${Ts}s）：G(z)=(${r.num})/(${r.den})`);
+}
+
 /* ---------------- 属性面板 ---------------- */
 
 function renderSignalProps() {
@@ -893,6 +999,20 @@ function renderSignalProps() {
       <input type="text" data-key="num" value="${esc(b.params.num || '1')}"></div>`);
     rows.push(`<div class="prop-row"><label>分母 D(s)</label>
       <input type="text" data-key="den" value="${esc(b.params.den || '1')}"></div>`);
+    rows.push(`<button type="button" class="prop-btn" id="tf-c2d">离散化 (c2d · ZOH)</button>`);
+    rows.push(`<div class="prop-tip">按当前「仿真」中的采样周期 Ts，将连续传函零阶保持离散化为 z 域传函（与 MATLAB c2d('zoh') 一致）</div>`);
+  }
+
+  if (b.type === 'PID') {
+    rows.push(`<div class="prop-row"><label>比例 Kp</label>
+      <input type="number" step="0.1" data-key="kp" value="${esc(b.params.kp || '0')}"></div>`);
+    rows.push(`<div class="prop-row"><label>积分 Ki</label>
+      <input type="number" step="0.1" data-key="ki" value="${esc(b.params.ki || '0')}"></div>`);
+    rows.push(`<div class="prop-row"><label>微分 Kd</label>
+      <input type="number" step="0.1" data-key="kd" value="${esc(b.params.kd || '0')}"></div>`);
+    rows.push(`<div class="prop-row"><label>输出限幅 Umax</label>
+      <input type="number" step="0.1" data-key="umax" value="${esc(b.params.umax || '0')}"></div>`);
+    rows.push(`<div class="prop-tip">离散 PID（位置式）：u(k)=Kp·e(k)+Ki·Σe·Ts+Kd·(e(k)−e(k−1))/Ts，采样周期取「仿真」中的 Ts。Umax&gt;0 时启用限幅与抗积分饱和。</div>`);
   }
 
   if (b.type === 'SOURCE') {
@@ -902,17 +1022,23 @@ function renderSignalProps() {
         ${SOURCE_SIGNALS.map((s) =>
           `<option value="${s.key}"${s.key === cur ? ' selected' : ''}>${s.cn}　${s.formula}</option>`).join('')}
       </select></div>`);
+    if (cur === 'expr') {
+      rows.push(`<div class="prop-row"><label>自定义表达式 f(t)</label>
+        <input type="text" data-key="expr" value="${esc(b.params.expr || 'sin(t)')}" placeholder="例如 sin(t)、1+0.5*cos(2*pi*t)"></div>`);
+      rows.push(`<div class="prop-tip">自变量 t（秒）。运算 + - * / 及幂 ^；支持隐式乘法（2sin(t)、2pi、(t+1)(t-1)）；常量 pi / e；单位阶跃 u(x)（u(t)、u(t-1)）；函数 sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, log, log10, sqrt, cbrt, abs, sign, floor, ceil, round, min, max, pow。中文输入法的全角括号/数字/符号会自动转换。语法错误时仿真按 0 处理并显示具体原因。</div>`);
+    }
   }
 
   if (b.type === 'SUM') {
-    rows.push('<div class="prop-row"><label>输入端符号（点击切换 ±）</label></div>');
-    const signsHtml = (b.signs || [1, 1]).map((s, i) =>
+    const dirName = ['左', '上', '下'];
+    rows.push('<div class="prop-row"><label>输入端符号（点击切换 ±，共 左/上/下 三路）</label></div>');
+    const signsHtml = (b.signs || [1, 1, 1]).map((s, i) =>
       `<button class="sum-sign-btn" data-idx="${i}" style="color:${s >= 0 ? '#77ac30' : '#d95319'};font-weight:bold;font-size:16px;padding:4px 10px;margin:2px;border:1px solid var(--border);border-radius:var(--radius-sm);background:#fff;cursor:pointer">
-        ${s >= 0 ? '+' : '−'} in${i}
+        ${s >= 0 ? '+' : '−'} ${dirName[i] || `in${i}`}
       </button>`
     ).join('');
     rows.push(`<div style="display:flex;flex-wrap:wrap;gap:2px;margin-bottom:8px">${signsHtml}</div>`);
-    rows.push('<div class="prop-tip">右键点击求和点可增减输入端；连线时自动分配空闲输入端，点击 ± 可切换正负</div>');
+    rows.push('<div class="prop-tip">求和点为圆形四向端口：左 / 上 / 下 为输入，右为输出；右键可增减输入端，点击 ± 切换正负</div>');
   }
 
   if (b.type === 'PICKOFF') {
@@ -931,7 +1057,7 @@ function renderSignalProps() {
     rows.push('<div class="prop-tip">示波器：观测该点时域响应。设置输入信号与仿真时间后点击「▶ 仿真」（或双击本节点）</div>');
   }
 
-  rows.push('<div class="prop-tip">右键节点打开菜单 · Delete 键删除 · 单击输出引脚开始连线（可拖到目标引脚松手），点击空白落拐点，自动吸附网格</div>');
+  rows.push('<div class="prop-tip">单击输出引脚开始连线：线条跟随鼠标，点击落下固定点（可连续拐弯），点击目标节点完成；右键或 Esc 取消，Backspace 撤销上一个固定点。落点自动吸附网格并在近轴方向对齐，走向不锁定 · Delete 删除选中对象</div>');
   box.innerHTML = rows.join('');
 
   // 绑定 SUM 符号切换
@@ -947,11 +1073,25 @@ function renderSignalProps() {
   // 绑定 TF 参数编辑与信号源类型选择
   box.querySelectorAll('input[data-key], select[data-key]').forEach((inp) => {
     inp.addEventListener('change', () => {
-      b.params[inp.dataset.key] = inp.value.trim() || '1';
+      const k = inp.dataset.key;
+      if (k === 'expr') {
+        const v = inp.value.trim();
+        b.params.expr = v || 'sin(t)';
+        const { fn, error } = checkSourceExpr(b.params.expr);
+        if (!fn) statusSG(`表达式无效：${error}（仿真时按 0 处理）`, true);
+        else statusSG(`信号源表达式已更新：f(t)=${b.params.expr}`);
+        renderSignalGraph();
+        renderSignalProps();
+        return;
+      }
+      b.params[k] = inp.value.trim() || '1';
       renderSignalGraph();
       renderSignalProps();
     });
   });
+
+  // 绑定 TF 离散化（c2d）
+  box.querySelector('#tf-c2d')?.addEventListener('click', () => discretizeTF(b));
 }
 
 /* ---------------- 连线 ---------------- */
@@ -992,13 +1132,14 @@ function startWireBranchFromWire(wireId, pt) {
   });
   // 以引出点为起点开始新分支
   SG.sel = { kind: 'block', id: pick.id };
-  SG.pending = { fromBlock: pick.id, fromPort: 'out', bends: [] };
+  SG.pending = { fromBlock: pick.id, fromPort: 'out', bends: [], releaseFinish: false };
   SG.cursor = null;
   SG.snap = null;
   renderSignalGraph();
+  updateSignalPreview();
   updateSignalSelection();
   renderSignalProps();
-  statusSG('已自动创建连接点：点击空白可落拐点，点击目标节点完成分支（Esc 取消）');
+  statusSG('已自动创建连接点：线条跟随鼠标，点击落固定点，点击目标节点完成分支（右键 / Esc 取消）');
 }
 
 /* 命中引脚：光标靠近引脚圆点时精确命中（Proteus 式），返回最近的一个 */
@@ -1026,87 +1167,135 @@ function portHitAt(pt) {
   return best;
 }
 
-/* 命中节点输入端口：光标落在节点可视范围内即视为指向其输入端
-   （求和点优先吸附空闲端；全满时仍返回节点，由 finishSignalWire 自动新增端口） */
+/* 命中节点输入端口：光标落在某节点范围内时，按“几何最近的输入端”判定，
+ * 这样求和点可精确选到左 / 上 / 下 中离光标最近的那一路；若该路已被占用，
+ * 则回退到最近的空闲输入端。其余节点只有一个输入端，点其任意位置即可连接。 */
 function portAt(pt) {
   if (!SG.model) return null;
+  let target = null;
   for (const b of SG.model.blocks) {
     const bb = blockBBox(b);
     if (pt.x >= bb.x && pt.x <= bb.x + bb.w && pt.y >= bb.y && pt.y <= bb.y + bb.h) {
-      let portIdx = 0;
-      if (b.type === 'SUM') {
-        const free = findFreeSumInput(b);
-        if (free !== -1) portIdx = free;
-      }
-      const p = nodeInput(b, portIdx);
-      if (p) return { block: b, portIdx, x: p.x, y: p.y };
+      target = b;
+      break;
     }
   }
-  return null;
+  if (!target) return null;
+  const n = signalInputCount(target);
+  let best = null;
+  for (let i = 0; i < n; i++) {
+    const p = nodeInput(target, i);
+    if (!p) continue;
+    const d = Math.hypot(pt.x - p.x, pt.y - p.y);
+    if (!best || d < best.dist) best = { portIdx: i, x: p.x, y: p.y, dist: d };
+  }
+  if (!best) return null;
+  // 求和点：该输入端被占用 → 改取最近的空闲端
+  if (target.type === 'SUM') {
+    const occupied = (i) => SG.model.wires.some((w) => w.to.block === target.id && w.to.port === `in${i}`);
+    if (occupied(best.portIdx)) {
+      let free = null;
+      for (let i = 0; i < n; i++) {
+        if (occupied(i)) continue;
+        const p = nodeInput(target, i);
+        const d = Math.hypot(pt.x - p.x, pt.y - p.y);
+        if (!free || d < free.dist) free = { portIdx: i, x: p.x, y: p.y, dist: d };
+      }
+      if (free) best = free;
+    }
+  }
+  return { block: target, portIdx: best.portIdx, x: best.x, y: best.y };
 }
 
-/* 连线预览：起点引脚 → 已落拐点 → 光标（吸附格点或目标端口）的正交虚线 */
+/* 输入端口的进入方向（用于正交连线的末端走向）：求和点 上→北、下→南、左→西，其余→西 */
+function inputDir(node, index) {
+  if (node && node.type === 'SUM') {
+    if (index === 1) return { x: 0, y: -1 };   // 上
+    if (index === 2) return { x: 0, y: 1 };    // 下
+  }
+  return IN_DIR;
+}
+
+/* 当前正在跟随鼠标的那一小段的起点：最后一个固定点，或起始输出引脚 */
+function lastWireAnchor() {
+  if (!SG.pending || !SG.model) return null;
+  const bends = SG.pending.bends || [];
+  if (bends.length) return bends[bends.length - 1];
+  const b = SG.model.blocks.find((x) => x.id === SG.pending.fromBlock);
+  return b ? nodeOutput(b) : null;
+}
+
+/* 连线预览：起点引脚 → 已落固定点 → 光标（网格吸附/软对齐或目标端口）。
+ * 与最终连线共用 buildWirePoints，保证所见即所得。 */
 function updateSignalPreview() {
   const layer = $('#signal-temp-layer');
   if (!layer) return;
   layer.innerHTML = '';
   if (!SG.pending || !SG.model) return;
   const from = SG.model.blocks.find((b) => b.id === SG.pending.fromBlock);
-  if (!from) return;
-  const p0 = nodeOutput(from);
+  const p0 = from ? nodeOutput(from) : null;
   if (!p0) return;
-  const end = SG.snap || (SG.cursor ? { x: SG.cursor.x, y: SG.cursor.y } : null);
   const bends = (SG.pending.bends || []).map((p) => ({ x: p.x, y: p.y }));
-  // 已落拐点标成小方块
-  bends.forEach((p) => {
-    layer.appendChild(el('rect', {
-      x: p.x - 3, y: p.y - 3, width: 6, height: 6, rx: 1,
-      fill: '#0072bd', stroke: '#ffffff', 'stroke-width': 1,
-    }));
-  });
-  if (end) {
-    const pts = [p0, ...bends, { x: end.x, y: end.y }];
-    const dirs = [OUT_DIR, ...bends.map(() => null),
-      SG.snap ? IN_DIR : null];
-    const poly = routeChain(pts, dirs);
-    if (poly.length >= 2) {
+  const end = SG.snap ? { x: SG.snap.x, y: SG.snap.y }
+    : (SG.cursor ? { x: SG.cursor.x, y: SG.cursor.y } : null);
+  const endDir = SG.snap ? inputDir(SG.snap.block, SG.snap.portIdx) : null;
+  const poly = buildWirePoints(p0, bends, end, endDir);
+
+  if (poly.length >= 2) {
+    // 已确定部分画实线，跟随鼠标的最后一段画虚线橡皮筋，区分"已落点"与"正在拖动"
+    if (poly.length > 2) {
       layer.appendChild(el('path', {
-        d: polylineD(poly), fill: 'none', stroke: '#0072bd',
-        'stroke-width': 2, 'stroke-dasharray': '6 4',
+        d: polylineD(poly.slice(0, -1)), fill: 'none', stroke: '#0072bd',
+        'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+        opacity: 0.7,
       }));
     }
+    layer.appendChild(el('path', {
+      d: polylineD(poly.slice(-2)), fill: 'none', stroke: '#0072bd',
+      'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+      'stroke-dasharray': '6 4',
+    }));
   }
+  // 已落固定点：方块 + 序号
+  bends.forEach((p, i) => {
+    layer.appendChild(el('rect', {
+      x: p.x - 4, y: p.y - 4, width: 8, height: 8, rx: 1.5,
+      fill: '#0072bd', stroke: '#fff', 'stroke-width': 1.5,
+    }));
+    layer.appendChild(el('text', {
+      x: p.x + 8, y: p.y - 6, 'font-size': '9px', fill: '#0072bd',
+    }, String(i + 1)));
+  });
   // 起点
   layer.appendChild(el('circle', {
     cx: p0.x, cy: p0.y, r: 5, fill: '#0072bd', stroke: '#fff', 'stroke-width': 1.5,
   }));
-  // 吸附到目标端口时的锚环
+  // 吸附到目标端口时显示锚环，否则显示跟随光标的小点
   if (SG.snap) {
     layer.appendChild(el('circle', {
       cx: SG.snap.x, cy: SG.snap.y, r: 8,
-      fill: 'none', stroke: '#0072bd', 'stroke-width': 2,
+      fill: 'rgba(0,114,189,0.10)', stroke: '#0072bd', 'stroke-width': 2,
     }));
   } else if (end) {
-    layer.appendChild(el('circle', {
-      cx: end.x, cy: end.y, r: 3, fill: '#0072bd',
-    }));
+    layer.appendChild(el('circle', { cx: end.x, cy: end.y, r: 3, fill: '#0072bd' }));
   }
 }
 
 function startSignalWire(blockId) {
   const block = SG.model?.blocks.find((b) => b.id === blockId);
   if (!block || !nodeOutput(block)) {
-    statusSG('示波器没有输出端，不能从此处开始连线', true);
+    statusSG('该节点没有输出端，不能从此处开始连线', true);
     return;
   }
-  SG.pending = { fromBlock: blockId, fromPort: 'out', bends: [] };
+  SG.pending = { fromBlock: blockId, fromPort: 'out', bends: [], releaseFinish: true };
   SG.cursor = null;
   SG.snap = null;
   renderSignalGraph();
-  statusSG('连线中：拖到目标引脚松手，或点击空白落拐点后点击目标节点（Esc 取消）');
+  updateSignalPreview();
+  statusSG('连线中：线条跟随鼠标，点击落下固定点（可连续拐弯），点击目标节点完成；右键 / Esc 取消');
 }
 
-function finishSignalWire(toBlockId) {
+function finishSignalWire(toBlockId, preferredPortIdx) {
   if (!SG.pending) return;
   const fromBlock = SG.model.blocks.find((b) => b.id === SG.pending.fromBlock);
   const toBlock = SG.model.blocks.find((b) => b.id === toBlockId);
@@ -1121,19 +1310,25 @@ function finishSignalWire(toBlockId) {
     statusSG('不能将节点连接到自己');
     return;
   }
-  // 目标输入端口：求和点自动分配空闲端，满了自动新增；其余类型只有一个输入端
+  // 目标输入端口：优先使用用户指定的端口（求和点可精确选 左/上/下）；
+  // 若该端口被占用或无效，则回退到最近的空闲端，满了再自动新增（上限 3）。
   let portIdx = 0;
   if (toBlock.type === 'SUM') {
-    portIdx = findFreeSumInput(toBlock);
-    if (portIdx === -1) {
-      if (signalInputCount(toBlock) >= 8) {
-        cancelSignalPending();
-        statusSG('求和点最多支持 8 个输入端', true);
-        return;
+    const occupied = (i) => SG.model.wires.some((w) => w.to.block === toBlockId && w.to.port === `in${i}`);
+    if (preferredPortIdx != null && preferredPortIdx < signalInputCount(toBlock) && !occupied(preferredPortIdx)) {
+      portIdx = preferredPortIdx;
+    } else {
+      portIdx = findFreeSumInput(toBlock);
+      if (portIdx === -1) {
+        if (signalInputCount(toBlock) >= 3) {
+          cancelSignalPending();
+          statusSG('求和点最多支持 3 个输入端（左 / 上 / 下）', true);
+          return;
+        }
+        toBlock.signs.push(1);
+        portIdx = toBlock.signs.length - 1;
+        statusSG('求和点输入端已满，已自动新增输入端（+）');
       }
-      toBlock.signs.push(1);
-      portIdx = toBlock.signs.length - 1;
-      statusSG('求和点输入端已满，已自动新增输入端（+）');
     }
   }
   const toPort = `in${portIdx}`;
@@ -1168,6 +1363,8 @@ function cancelSignalPending() {
   SG.pending = null;
   SG.cursor = null;
   SG.snap = null;
+  const svg = $('#circ-canvas');
+  if (svg) svg.style.cursor = '';
   updateSignalPreview();
   renderSignalGraph();
 }
@@ -1176,11 +1373,12 @@ function cancelSignalPending() {
 
 function bindSignalToolbar() {
   $('#circ-run')?.addEventListener('click', runSimulation);
+  $('#sig-bode')?.addEventListener('click', runFrequencyAnalysis);
 
   const svg = $('#circ-canvas');
   svg?.addEventListener('click', (e) => {
     if (!SG.model) return;
-    // 连线中的点击已在 pointerdown 处理（完成/落拐点/取消）
+    // 连线中的点击已在 pointerdown 处理（完成 / 落固定点），取消由右键或 Esc 处理
     if (SG.pending) return;
     const blockEl = e.target.closest('[data-block]');
     // 双击示波器直接仿真
@@ -1219,6 +1417,24 @@ function bindSignalKeys() {
       if (e.key === 'Escape') e.target.blur();
       return;
     }
+    // 连线中：Esc 取消（原有快捷键保留）、Backspace 撤销上一个固定点；其余键不误删元件
+    if (SG.pending) {
+      if (e.key === 'Escape') {
+        cancelSignalPending();
+        statusSG('已取消连线');
+      } else if (e.key === 'Backspace') {
+        e.preventDefault();
+        const bends = SG.pending.bends || [];
+        if (bends.length) {
+          bends.pop();
+          SG.cursor = lastWireAnchor();
+          SG.snap = null;
+          updateSignalPreview();
+          statusSG(`已撤销上一个固定点（剩余 ${bends.length} 个）`);
+        }
+      }
+      return;
+    }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (!SG.sel) return;
       e.preventDefault();
@@ -1232,12 +1448,7 @@ function bindSignalKeys() {
         statusSG('已删除连线');
       }
     } else if (e.key === 'Escape') {
-      if (SG.pending) {
-        cancelSignalPending();
-        statusSG('已取消连线');
-      } else {
-        hideSignalMenu();
-      }
+      hideSignalMenu();
     }
   });
 }
@@ -1275,22 +1486,24 @@ function runSimulation() {
     statusSG('信号流图为空，请先添加节点', true);
     return;
   }
-  const result = analyzeSignalGraph(SG.model);
-  if (result.error) {
-    statusSG(result.error, true);
-    return;
-  }
   const T = Number($('#sig-sim-time')?.value) || 10;
   if (!(T > 0)) {
     statusSG('仿真时间必须大于 0', true);
     return;
   }
-  /* 含采样器/零阶保持器或 z 域模块时，走采样数据（连续+离散混合）仿真 */
+  /* 含采样器/零阶保持器或 z 域模块时，走采样数据（连续+离散混合）仿真。
+     混合仿真直接使用差分方程，不依赖 s 域梅森公式；提前分流可以避免
+     z^-1、z 隐式乘法等合法表达式被梅森预检误判为“非法指数”。 */
   const Ts = Number($('#sig-ts')?.value) || 1;
   const needsHybrid = SG.model.blocks.some((b) =>
-    b.type === 'SAMPLER' || b.type === 'ZOH'
+    b.type === 'SAMPLER' || b.type === 'ZOH' || b.type === 'PID'
     || (b.type === 'TF' && /[zZ]/.test(`${b.params?.num || ''}${b.params?.den || ''}`)));
   if (needsHybrid) { runHybridSimulation(T, Ts); return; }
+  const result = analyzeSignalGraph(SG.model);
+  if (result.error) {
+    statusSG(result.error, true);
+    return;
+  }
   /* 每个示波器：各信号源贡献线性叠加 */
   const series = [];
   const tfLines = [];
@@ -1350,6 +1563,102 @@ function runSimulation() {
     series,
   });
   statusSG(`仿真完成：${series.length} 路输出曲线（${result.sources.length} 个信号源叠加）`);
+}
+
+/* 频域分析：对当前连续 s 域信号流图，逐示波器求闭环 T(s)，
+ * 计算 Bode 图、极点/零点与稳定性，结果写入属性面板并弹出 Bode 图窗。 */
+function runFrequencyAnalysis() {
+  if (!SG.model || !SG.model.blocks.length) {
+    statusSG('信号流图为空，请先添加节点', true);
+    return;
+  }
+  // 离散（含采样器/z 域模块/PID）系统：开环极点/零点 + z 平面稳定性，不绘制 Bode
+  const hasDiscrete = SG.model.blocks.some((b) =>
+    b.type === 'SAMPLER' || b.type === 'ZOH' || b.type === 'PID'
+    || (b.type === 'TF' && /[zZ]/.test(`${b.params?.num || ''}${b.params?.den || ''}`)));
+  if (hasDiscrete) {
+    const lines = [];
+    const zTfs = SG.model.blocks.filter((b) =>
+      b.type === 'TF' && /[zZ]/.test(`${b.params?.num || ''}${b.params?.den || ''}`));
+    if (!zTfs.length) {
+      lines.push('<div class="prop-empty">未找到 z 域传递函数（PID 的离散特性请通过「仿真」观察）</div>');
+    }
+    zTfs.forEach((b, i) => {
+      const parsed = parseZPair(b.params.num, b.params.den);
+      const stab = zStability(parsed.den);
+      const name = `G${i + 1}`;
+      const poles = stab.roots.map((r) => (r.mult > 1 ? `${formatComplex(r)}×${r.mult}` : formatComplex(r))).join(', ');
+      const zeros = polyRoots(parsed.num).map((r) => (r.mult > 1 ? `${formatComplex(r)}×${r.mult}` : formatComplex(r))).join(', ');
+      const stTxt = stab.stable ? '稳定（全部极点 |z|&lt;1）'
+        : (stab.marginal.length ? `临界（${stab.marginal.length} 个极点在单位圆上）` : `不稳定（${stab.unstable.length} 个极点 |z|&gt;1）`);
+      lines.push(`
+        <div style="margin:6px 0 2px;font-family:var(--mono);font-size:12px">
+          <b>${esc(name)}</b>　G(z) = ${esc(b.params.num)} / ${esc(b.params.den)}</div>
+        <div style="font-family:var(--mono);font-size:11px;color:#5a6268;margin-left:8px">
+          极点 z = ${poles || '—'}　|　零点 z = ${zeros || '—'}</div>
+        <div style="font-family:var(--mono);font-size:11px;margin-left:8px;color:${stab.stable ? '#2e7d32' : '#c0392b'}">
+          稳定性：${stTxt}</div>
+      `);
+    });
+    const box = $('#circ-props-body');
+    if (box) {
+      box.innerHTML = `
+        <div class="prop-head" style="color:#8e44ad">频域分析 · z 域<span class="prop-id">极点/零点 · 稳定性</span></div>
+        <div class="prop-tip" style="margin:4px 0">离散系统不绘制 Bode；稳定性按 z 平面（全部极点 |z|&lt;1 为稳定）。
+          闭环稳定性请结合「仿真」观察响应是否收敛。</div>
+        ${lines.join('')}
+      `;
+    }
+    statusSG('z 域频域分析完成');
+    return;
+  }
+  const result = analyzeSignalGraph(SG.model);
+  if (result.error) { statusSG(result.error, true); return; }
+
+  const systems = [];
+  const lines = [];
+  result.probes.forEach((p, pi) => {
+    const name = p.block.params?.name || `示波器${pi + 1}`;
+    if (p.error) {
+      lines.push(`<div style="margin:3px 0;color:#c0392b">${esc(name)}　${esc(p.error)}</div>`);
+      return;
+    }
+    p.contributions.forEach((c, ci) => {
+      const sysName = p.contributions.length > 1 ? `${name}·源${ci + 1}` : name;
+      const bode = bodeResponse(c.tf.n, c.tf.d, { wMin: 1e-2, wMax: 1e3 });
+      if (bode) systems.push({ name: sysName, w: bode.w, magDb: bode.magDb, phaseDeg: bode.phaseDeg });
+      const stab = stabilityFromDen(c.tf.d);
+      const poles = stab.roots.map((r) => (r.mult > 1 ? `${formatComplex(r)}×${r.mult}` : formatComplex(r))).join(', ');
+      const zeros = polyRoots(c.tf.n).map((r) => (r.mult > 1 ? `${formatComplex(r)}×${r.mult}` : formatComplex(r))).join(', ');
+      lines.push(`
+        <div style="margin:6px 0 2px;font-family:var(--mono);font-size:12px">
+          <b>${esc(sysName)}</b>　T(s) = ${esc(c.tf.text)}</div>
+        <div style="font-family:var(--mono);font-size:11px;color:#5a6268;margin-left:8px">
+          极点 s = ${poles || '—'}　|　零点 s = ${zeros || '—'}</div>
+        <div style="font-family:var(--mono);font-size:11px;margin-left:8px;color:${stab.stable ? '#2e7d32' : '#c0392b'}">
+          稳定性：${stab.stable ? '稳定（全部极点左半平面）' : `不稳定（${stab.unstable.length} 个右半平面极点）`}</div>
+      `);
+    });
+  });
+
+  const box = $('#circ-props-body');
+  if (box) {
+    box.innerHTML = `
+      <div class="prop-head" style="color:#0072bd">频域分析<span class="prop-id">Bode · 极点/零点 · 稳定性</span></div>
+      <div class="prop-tip" style="margin:4px 0">仅连续 s 域系统；Bode 横轴为 log₁₀ω（rad/s）。</div>
+      ${lines.join('') || '<div class="prop-empty">无可用结果</div>'}
+    `;
+  }
+  if (!systems.length) {
+    statusSG('没有可分析的连续传递函数', true);
+    return;
+  }
+  showBode({
+    title: 'Bode 图',
+    subtitle: `幅频(dB)/相频(°) · 横轴 log₁₀ω · ${systems.length} 条曲线`,
+    systems,
+  });
+  statusSG(`频域分析完成：${systems.length} 条 Bode 曲线`);
 }
 
 /* ---------------- 外部接口 ---------------- */

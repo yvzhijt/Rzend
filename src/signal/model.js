@@ -7,7 +7,7 @@ export function uid(prefix = 's') {
 
 const GRID = 12;
 const GRID_OFFSET = 6;
-const BLOCK_TYPES = new Set(['SOURCE', 'TF', 'SUM', 'PICKOFF', 'PROBE', 'SAMPLER', 'ZOH']);
+const BLOCK_TYPES = new Set(['SOURCE', 'TF', 'SUM', 'PICKOFF', 'PROBE', 'SAMPLER', 'ZOH', 'PID']);
 
 export function snapGrid(value) {
   const number = Number(value);
@@ -33,7 +33,7 @@ export function serializeSignalGraph(model) {
       y: block.y,
       rot: block.rot || 0,
       params: { ...(block.params || {}) },
-      signs: block.type === 'SUM' && Array.isArray(block.signs) ? block.signs.slice(0, 8) : undefined,
+      signs: block.type === 'SUM' && Array.isArray(block.signs) ? block.signs.slice(0, 3) : undefined,
     })),
     wires: (model.wires || []).map((wire) => ({
       id: wire.id,
@@ -45,8 +45,8 @@ export function serializeSignalGraph(model) {
 }
 
 function inputCount(block) {
-  if (block.type === 'SUM') return block.signs.length;
-  if (['TF', 'PICKOFF', 'PROBE', 'SAMPLER', 'ZOH'].includes(block.type)) return 1;
+  if (block.type === 'SUM') return Math.max(2, Math.min(3, block.signs?.length || 2));
+  if (['TF', 'PICKOFF', 'PROBE', 'SAMPLER', 'ZOH', 'PID'].includes(block.type)) return 1;
   return 0;
 }
 
@@ -63,7 +63,7 @@ export function deserializeSignalGraph(data) {
     seenIds.add(id);
     const rawSigns = Array.isArray(item.signs) ? item.signs : [];
     const signs = item.type === 'SUM'
-      ? Array.from({ length: Math.max(2, Math.min(8, rawSigns.length || 2)) }, (_, index) => (
+      ? Array.from({ length: Math.max(2, Math.min(3, rawSigns.length || 3)) }, (_, index) => (
         rawSigns[index] === -1 ? -1 : 1
       ))
       : [];
@@ -75,7 +75,14 @@ export function deserializeSignalGraph(data) {
       params.den = String(params.den ?? 's + 1');
     }
     if (item.type === 'SOURCE') {
-      if (!['impulse', 'step', 'ramp', 'para'].includes(params.sig)) params.sig = 'step';
+      if (!['impulse', 'step', 'ramp', 'para', 'expr'].includes(params.sig)) params.sig = 'step';
+      if (params.sig === 'expr' && typeof params.expr !== 'string') params.expr = 'sin(t)';
+    }
+    if (item.type === 'PID') {
+      params.kp = String(params.kp ?? '1');
+      params.ki = String(params.ki ?? '0');
+      params.kd = String(params.kd ?? '0');
+      params.umax = String(params.umax ?? '0');
     }
     blocks.push({
       id,

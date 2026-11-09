@@ -109,12 +109,14 @@ function tokenizeZ(s) {
       i = j;
       continue;
     }
-    if ('sz+-*^()'.includes(c)) {
+    if ('szSZ+-*^()'.includes(c)) {
+      // 变量统一成小写，允许用户输入 Z / Z^-1
+      const tok = c === 'S' ? 's' : c === 'Z' ? 'z' : c;
       const prev = tokens[tokens.length - 1];
       const implicit = prev && (isNumCh(prev) || prev === 's' || prev === 'z' || prev === ')')
-        && (c === 's' || c === 'z' || c === '(' || isNumCh(c));
+        && (tok === 's' || tok === 'z' || tok === '(' || isNumCh(tok));
       if (implicit) tokens.push('*');
-      tokens.push(c);
+      tokens.push(tok);
       i++;
       continue;
     }
@@ -307,12 +309,218 @@ function blockDomainZ(b) {
 }
 
 function sourceValueZ(b, t) {
-  const key = ['impulse', 'step', 'ramp', 'para'].includes(b.params?.sig) ? b.params.sig : 'step';
+  const key = ['impulse', 'step', 'ramp', 'para', 'expr'].includes(b.params?.sig) ? b.params.sig : 'step';
   if (key === 'impulse') return t === 0 ? 1 : 0;
   if (key === 'step') return 1;
   if (key === 'ramp') return t;
   if (key === 'para') return (t * t) / 2;
+  if (key === 'expr') {
+    const fn = compileSourceExpr(b.params?.expr || 'sin(t)');
+    if (!fn) return 0;
+    const v = fn(t);
+    return isFinite(v) ? v : 0;
+  }
   return 0;
+}
+
+/* ---------------- 自定义信号源表达式 ---------------- */
+
+/* 桌面端 CSP 为 default-src 'self'（未开放 unsafe-eval），new Function/eval 在打包后
+ * 会被 WebView2 拒绝，导致所有表达式失效。这里改为自带词法 + 递归下降解析器，
+ * 把表达式编译成 (t)=>number 的闭包链：不依赖 eval、不受 CSP 限制、也不会执行任意 JS。 */
+
+/* 中文输入法常见的全角 / 数学符号归一化 */
+function normalizeExpr(s) {
+  const map = {
+    '（': '(', '）': ')', '，': ',', '＋': '+', '－': '-', '∗': '*', '＊': '*',
+    '／': '/', '＾': '^', '．': '.', '×': '*', '÷': '/', '−': '-',
+    '–': '-', '—': '-', 'π': 'pi', '　': ' ',
+  };
+  let out = '';
+  for (const ch of s) {
+    const c = ch.charCodeAt(0);
+    if (c >= 0xFF10 && c <= 0xFF19) out += String.fromCharCode(c - 0xFF10 + 48);
+    else if (c >= 0xFF21 && c <= 0xFF3A) out += String.fromCharCode(c - 0xFF21 + 65);
+    else if (c >= 0xFF41 && c <= 0xFF5A) out += String.fromCharCode(c - 0xFF41 + 97);
+    else out += (map[ch] ?? ch);
+  }
+  return out;
+}
+
+const EXPR_FUNCS = Object.freeze({
+  sin: Math.sin, cos: Math.cos, tan: Math.tan,
+  asin: Math.asin, acos: Math.acos, atan: Math.atan, atan2: Math.atan2,
+  sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,
+  exp: Math.exp, log: Math.log, log10: Math.log10,
+  sqrt: Math.sqrt, cbrt: Math.cbrt, abs: Math.abs,
+  sign: Math.sign, floor: Math.floor, ceil: Math.ceil, round: Math.round,
+  min: Math.min, max: Math.max, pow: Math.pow,
+  u: (x) => (x >= 0 ? 1 : 0),                       // 单位阶跃 Heaviside
+});
+const EXPR_CONSTS = Object.freeze({ pi: Math.PI, PI: Math.PI, e: Math.E, E: Math.E });
+const EXPR_PREC = Object.freeze({ '+': 1, '-': 1, '*': 2, '/': 2, '^': 4 });
+const UNARY_PREC = 3;      // 一元负号低于幂：-t^2 == -(t^2)
+const IMPLICIT_PREC = 2;   // 隐式乘法 2sin(t) / 2pi / (t+1)(t-1)
+
+function tokenizeExpr(src) {
+  const tokens = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (/[0-9.]/.test(c)) {
+      const m = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(src.slice(i));
+      if (!m) throw new Error(`第 ${i + 1} 个字符「${c}」不是合法数字`);
+      tokens.push({ k: 'num', v: Number(m[0]), pos: i });
+      i += m[0].length;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i));
+      tokens.push({ k: 'id', v: m[0], pos: i });
+      i += m[0].length;
+      continue;
+    }
+    if ('+-*/^(),'.includes(c)) {
+      tokens.push({ k: c, pos: i });
+      i++;
+      continue;
+    }
+    throw new Error(`第 ${i + 1} 个字符「${c}」无法识别`);
+  }
+  tokens.push({ k: 'end', pos: src.length });
+  return tokens;
+}
+
+/* 解析并编译为 (t)=>number；语法错误抛出带位置信息的 Error */
+function compileExpression(src) {
+  const tokens = tokenizeExpr(normalizeExpr(src));
+  let p = 0;
+  const peek = () => tokens[p];
+  const next = () => tokens[p++];
+  const expect = (k) => {
+    const t = peek();
+    if (t.k !== k) throw new Error(`第 ${t.pos + 1} 个字符附近：缺少「${k}」`);
+    return next();
+  };
+  const startsOperand = (t) => t.k === 'num' || t.k === 'id' || t.k === '(';
+
+  const parsePrefix = () => {
+    const t = next();
+    if (t.k === '+') return parseExpr(UNARY_PREC);
+    if (t.k === '-') { const f = parseExpr(UNARY_PREC); return (time) => -f(time); }
+    if (t.k === 'num') { const v = t.v; return () => v; }
+    if (t.k === '(') { const f = parseExpr(0); expect(')'); return f; }
+    if (t.k === 'id') {
+      const name = t.v;
+      if (peek().k === '(') {
+        next();
+        const fn = Object.prototype.hasOwnProperty.call(EXPR_FUNCS, name) ? EXPR_FUNCS[name] : null;
+        if (!fn) throw new Error(`第 ${t.pos + 1} 个字符：未知函数「${name}」`);
+        const args = [];
+        if (peek().k !== ')') {
+          for (;;) {
+            args.push(parseExpr(0));
+            if (peek().k !== ',') break;
+            next();
+          }
+        }
+        expect(')');
+        return (time) => fn(...args.map((a) => a(time)));
+      }
+      if (name === 't') return (time) => time;
+      if (Object.prototype.hasOwnProperty.call(EXPR_CONSTS, name)) {
+        const v = EXPR_CONSTS[name];
+        return () => v;
+      }
+      throw new Error(`第 ${t.pos + 1} 个字符：未知变量「${name}」（自变量只能用 t）`);
+    }
+    throw new Error(`第 ${t.pos + 1} 个字符附近：缺少运算对象`);
+  };
+
+  const parseExpr = (minPrec) => {
+    let left = parsePrefix();
+    for (;;) {
+      const t = peek();
+      let op = null, prec = 0, rightAssoc = false;
+      const binaryPrec = Object.prototype.hasOwnProperty.call(EXPR_PREC, t.k)
+        ? EXPR_PREC[t.k] : undefined;
+      if (binaryPrec != null) {
+        op = t.k; prec = binaryPrec; rightAssoc = (t.k === '^');
+      } else if (startsOperand(t) && IMPLICIT_PREC >= minPrec) {
+        op = '*'; prec = IMPLICIT_PREC;
+      }
+      if (!op || prec < minPrec) break;
+      if (binaryPrec != null) next();
+      const right = parseExpr(rightAssoc ? prec : prec + 1);
+      const a = left, b = right;
+      if (op === '+') left = (time) => a(time) + b(time);
+      else if (op === '-') left = (time) => a(time) - b(time);
+      else if (op === '*') left = (time) => a(time) * b(time);
+      else if (op === '/') left = (time) => a(time) / b(time);
+      else left = (time) => Math.pow(a(time), b(time));
+    }
+    return left;
+  };
+
+  const fn = parseExpr(0);
+  const tail = peek();
+  if (tail.k !== 'end') throw new Error(`第 ${tail.pos + 1} 个字符附近：多余内容「${tail.v ?? tail.k}」`);
+  return fn;
+}
+
+/* 结果按表达式文本缓存，避免仿真时逐点重解析 */
+const _exprCache = new Map();
+
+/* 校验 + 编译：返回 { fn, error }，error 为可直接展示的中文原因 */
+export function checkSourceExpr(expr) {
+  if (typeof expr !== 'string' || !expr.trim()) return { fn: null, error: '表达式为空' };
+  const hit = _exprCache.get(expr);
+  if (hit) return hit;
+  let fn = null, error = null;
+  try {
+    fn = compileExpression(expr);
+    fn(0.5);                       // 烟雾测试：确保闭包可调用（不因除零等非有限值判错）
+  } catch (e) {
+    fn = null;
+    error = e?.message || '表达式语法错误';
+  }
+  const result = { fn, error };
+  _exprCache.set(expr, result);
+  return result;
+}
+
+export function compileSourceExpr(expr) {
+  return checkSourceExpr(expr).fn;
+}
+
+/* 离散 PID（位置式）状态机：u(k) = Kp·e(k) + I(k) + Kd·(e(k)−e(k−1))/Ts。
+ * 采样周期内输出保持不变（由调用方在相位 A 提交、相位 B 保持），仅在采样瞬间 advance 推进。
+ * Umax>0 时启用限幅与条件积分抗饱和。 */
+export function makePIDState(params, ts) {
+  const kp = Number(params?.kp) || 0;
+  const ki = Number(params?.ki) || 0;
+  const kd = Number(params?.kd) || 0;
+  const umax = Number(params?.umax) || 0;
+  let I = 0;
+  let e1 = 0;
+  let lastRaw = 0;
+  const output = (e) => {
+    const deriv = ts > 0 ? (e - e1) / ts : 0;
+    const raw = kp * e + I + kd * deriv;
+    lastRaw = raw;
+    if (umax > 0) return Math.max(-umax, Math.min(umax, raw));
+    return raw;
+  };
+  const advance = (e) => {
+    const saturated = umax > 0 && Math.abs(lastRaw) >= umax - 1e-12;
+    // 条件积分：未饱和时累加；饱和且积分方向进一步加深饱和时冻结，避免积分 windup
+    if (!(saturated && Math.sign(ki * e) === Math.sign(lastRaw))) {
+      I += ki * ts * e;
+    }
+    e1 = e;
+  };
+  return { output, advance, kind: 'pid' };
 }
 
 /* 采样数据（连续 + 离散混合）仿真。
@@ -341,6 +549,27 @@ export function simulateHybrid(model, opts) {
     incoming.get(w.to.block).push({ from: w.from.block, gain });
   });
 
+  const sources = blocks.filter((b) => b.type === 'SOURCE');
+  if (!sources.length) return { error: '缺少信号源，请添加一个信号源节点' };
+  const allProbes = blocks.filter((b) => b.type === 'PROBE');
+  if (!allProbes.length) return { error: '缺少示波器，请添加一个示波器节点观测输出' };
+
+  // 从信号源出发做可达性检查，不可达的示波器不参与仿真
+  const reachable = new Set(sources.map((b) => b.id));
+  const queue = [...reachable];
+  while (queue.length) {
+    const id = queue.shift();
+    for (const w of wires) {
+      const next = w.to.block;
+      if (w.from.block === id && next && !reachable.has(next)) {
+        reachable.add(next);
+        queue.push(next);
+      }
+    }
+  }
+  const probeBlocks = allProbes.filter((b) => reachable.has(b.id));
+  if (!probeBlocks.length) return { error: '信号源到示波器没有前向路径' };
+
   const hasContinuous = blocks.some((b) => b.type === 'TF' && blockDomainZ(b) === 's');
   const hasDiscrete = blocks.some((b) => b.type === 'TF' && blockDomainZ(b) === 'z');
   const hasBoundary = blocks.some((b) => b.type === 'SAMPLER' || b.type === 'ZOH');
@@ -359,13 +588,18 @@ export function simulateHybrid(model, opts) {
       state.set(b.id, { kind: dom === 'z' ? 'z' : 'cont', ss });
     } else if (b.type === 'SAMPLER' || b.type === 'ZOH') {
       state.set(b.id, { kind: 'hold', held: 0 });
+    } else if (b.type === 'PID') {
+      state.set(b.id, { kind: 'pid', ss: makePIDState(b.params, Ts) });
     }
   }
   if ([...state.values()].some((s) => s && s.err)) {
     return { error: '存在无法解析或不可仿真的传递函数，请检查分子/分母' };
   }
 
-  const M = hasContinuous ? 20 : 1;
+  // 采样器 / 零阶保持器把信号保持为台阶状：即便没有连续块，也要在每个采样周期内
+  // 记录若干子步，使示波器能画出阶梯（保持）波形，而非仅采样点的斜连线。
+  const needsInterp = hasContinuous || hasBoundary;
+  const M = hasContinuous ? 20 : (hasBoundary ? 4 : 1);
   const h = Ts / M;
   const totalSamples = Math.max(1, Math.round(T / Ts));
 
@@ -387,7 +621,6 @@ export function simulateHybrid(model, opts) {
     return s;
   };
 
-  const probeBlocks = blocks.filter((b) => b.type === 'PROBE');
   const series = probeBlocks.map((p) => ({ name: p.params?.name || '示波器', xs: [], ys: [] }));
 
   // 主循环：在采样瞬间 k·Ts 做离散/代数更新（结果存于该时刻），随后在 [kTs,(k+1)Ts) 内积分连续块
@@ -407,6 +640,7 @@ export function simulateHybrid(model, opts) {
         else if (b.type === 'SUM' || b.type === 'PICKOFF' || b.type === 'PROBE') v = inputOfCur(b, cur);
         else if (b.type === 'SAMPLER' || b.type === 'ZOH') v = inputOfCur(b, cur);
         else if (b.type === 'TF' && st) v = (st.kind === 'cont') ? (y.get(b.id) || 0) : st.ss.output(inputOfCur(b, cur));
+        else if (b.type === 'PID' && st) v = st.ss.output(inputOfCur(b, cur));
         else v = 0;
         cur.set(b.id, v);
       }
@@ -418,13 +652,15 @@ export function simulateHybrid(model, opts) {
     for (const b of blocks) {
       const st = state.get(b.id);
       if (b.type === 'TF' && st && st.kind === 'z') st.ss.advance(inputOfCur(b, cur), cur.get(b.id));
+      else if (b.type === 'PID' && st) st.ss.advance(inputOfCur(b, cur));
       else if ((b.type === 'SAMPLER' || b.type === 'ZOH') && st) st.held = cur.get(b.id);
     }
     y.clear();
     cur.forEach((v, kk) => y.set(kk, v));
     probeBlocks.forEach((p, i) => { series[i].xs.push(tNow); series[i].ys.push(y.get(p.id) || 0); });
 
-    // 相位 B（连续积分）：在 [tNow, tNow+Ts) 内以 RK4 推进连续块，输入由 ZOH 保持为常值
+    // 相位 B（连续积分）：在 [tNow, tNow+Ts) 内以 RK4 推进连续块，输入由 ZOH 保持为常值。
+    // 若有连续块，则在每个子步落点记录示波器，得到采样周期内的连续波形（可见纹波/保持段）。
     if (k < totalSamples) {
       for (let s = 0; s < M; s++) {
         const tcur = tNow + (s + 1) * h;
@@ -434,6 +670,9 @@ export function simulateHybrid(model, opts) {
           else if (b.type === 'SUM' || b.type === 'PICKOFF' || b.type === 'PROBE') y.set(b.id, inputOf(b));
           else if (b.type === 'SAMPLER' || b.type === 'ZOH') y.set(b.id, st ? st.held : 0);
           else if (b.type === 'TF' && st && st.kind === 'cont') y.set(b.id, st.ss.step(inputOf(b), h));
+        }
+        if (needsInterp) {
+          probeBlocks.forEach((p, i) => { series[i].xs.push(tcur); series[i].ys.push(y.get(p.id) || 0); });
         }
       }
     }

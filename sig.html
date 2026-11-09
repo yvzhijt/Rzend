@@ -12,6 +12,7 @@
       <span class="sim-title">信号系统仿真</span>
       <div class="sim-mode-group">
         <button class="toolbar-btn accent" id="circ-run" title="计算传递函数并在示波器显示时域响应">▶ 仿真</button>
+        <button class="toolbar-btn" id="sig-bode" title="对当前信号流图做频域分析（Bode 图、极点/零点、稳定性）">📈 频域分析</button>
         <label class="sim-field" style="margin-left:8px;font-size:12px">仿真时间
           <input id="sig-sim-time" type="number" value="10" min="0.1" step="1"
             style="width:60px;margin-left:4px;padding:2px 6px;border:1px solid var(--border);border-radius:var(--radius-sm)">
@@ -73,11 +74,15 @@
       <div id="scope-head">
         <span class="scope-title" id="scope-title">示波器</span>
         <span id="scope-sub"></span>
+        <button id="scope-identify" title="自动辨识一阶系统的 K 与 T（0.632 法）">辨识</button>
+        <button id="scope-data" title="将数值数据导出为 CSV">数据</button>
+        <button id="scope-export" title="导出为 PNG 图片">导出</button>
         <button id="scope-reset" title="复位视图">复位</button>
         <button id="scope-close" title="关闭">✕</button>
       </div>
       <canvas id="scope-canvas"></canvas>
       <div id="scope-legend"></div>
+      <div id="scope-readout" style="position:absolute;left:8px;bottom:6px;font:11px Consolas,'Courier New',monospace;color:#0072bd;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px;pointer-events:none;"></div>
     </div>
 
     <div id="circ-context-menu" class="circ-context-menu hidden" role="menu">

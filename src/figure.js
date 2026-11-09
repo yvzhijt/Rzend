@@ -15,12 +15,16 @@ const F = {
   legend: null,
   titleEl: null,
   subEl: null,
+  readoutEl: null,
   series: [],
   title: '绘图',
   subtitle: '',
   view: null,
   drag: null,
   headDrag: null,
+  mode: 'time',     // 'time' | 'bode'
+  bode: null,       // { systems, xmin, xmax, magMin, magMax, phMin, phMax }
+  mouse: null,      // 画布内鼠标坐标（用于游标读数）
 };
 
 export function initFigure() {
@@ -33,6 +37,7 @@ export function initFigure() {
   F.legend = win.querySelector('#scope-legend');
   F.titleEl = win.querySelector('#scope-title');
   F.subEl = win.querySelector('#scope-sub');
+  F.readoutEl = win.querySelector('#scope-readout');
 
   const dpr = window.devicePixelRatio || 1;
   F.canvas.width = CW * dpr;
@@ -43,9 +48,21 @@ export function initFigure() {
 
   win.querySelector('#scope-close')?.addEventListener('click', closeFigure);
   win.querySelector('#scope-reset')?.addEventListener('click', () => {
+    if (F.mode === 'bode') { draw(); return; }
     F.view = bounds();
     draw();
   });
+  win.querySelector('#scope-export')?.addEventListener('click', exportFigure);
+  win.querySelector('#scope-data')?.addEventListener('click', exportData);
+  win.querySelector('#scope-identify')?.addEventListener('click', identifyKT);
+
+  // 游标：鼠标在画布内移动时记录坐标并刷新读数
+  F.canvas.addEventListener('pointermove', (e) => {
+    const rect = F.canvas.getBoundingClientRect();
+    F.mouse = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    if (!F.drag) draw();
+  });
+  F.canvas.addEventListener('pointerleave', () => { F.mouse = null; draw(); });
 
   const head = win.querySelector('#scope-head');
   head?.addEventListener('pointerdown', (e) => {
@@ -96,6 +113,8 @@ export function initFigure() {
 export function showFigure({ title, subtitle, series }) {
   initFigure();
   if (!F.win) return;
+  F.mode = 'time';
+  F.bode = null;
   F.title = title || '绘图';
   F.subtitle = subtitle || '';
   F.series = (series || [])
@@ -109,7 +128,111 @@ export function showFigure({ title, subtitle, series }) {
   }
   if (F.titleEl) F.titleEl.textContent = F.title;
   if (F.subEl) F.subEl.textContent = F.subtitle;
+  if (F.readoutEl) F.readoutEl.textContent = '';
   draw();
+}
+
+/* Bode 双联图：上幅频(dB)、下相频(°)，横轴 log₁₀ω */
+export function showBode({ title, subtitle, systems }) {
+  initFigure();
+  if (!F.win || !systems || !systems.length) return;
+  F.mode = 'bode';
+  F.series = [];
+  F.view = null;
+  F.title = title || 'Bode 图';
+  F.subtitle = subtitle || '';
+  // 计算坐标范围
+  let magMin = Infinity, magMax = -Infinity, phMin = Infinity, phMax = -Infinity;
+  let xmin = Infinity, xmax = -Infinity;
+  const n = systems[0].w.length;
+  for (const s of systems) {
+    for (let i = 0; i < n; i++) {
+      xmin = Math.min(xmin, Math.log10(s.w[i]));
+      xmax = Math.max(xmax, Math.log10(s.w[i]));
+      magMin = Math.min(magMin, s.magDb[i]); magMax = Math.max(magMax, s.magDb[i]);
+      phMin = Math.min(phMin, s.phaseDeg[i]); phMax = Math.max(phMax, s.phaseDeg[i]);
+    }
+  }
+  const magSpan = (magMax - magMin) || 1;
+  magMin -= magSpan * 0.08; magMax += magSpan * 0.08;
+  // 相频按 45° 取整齐刻度，至少覆盖 ±90
+  let pLo = Math.floor(phMin / 45) * 45;
+  let pHi = Math.ceil(phMax / 45) * 45;
+  if (pHi - pLo < 90) { const mid = Math.round((phMin + phMax) / 2 / 45) * 45; pLo = mid - 90; pHi = mid + 90; }
+  F.bode = { systems, xmin, xmax, magMin, magMax, phMin: pLo, phMax: pHi };
+  F.win.classList.remove('hidden');
+  if (!F.win.style.left) {
+    F.win.style.left = `${Math.max(12, window.innerWidth - CW - 40)}px`;
+    F.win.style.top = '80px';
+  }
+  if (F.titleEl) F.titleEl.textContent = F.title;
+  if (F.subEl) F.subEl.textContent = F.subtitle;
+  if (F.readoutEl) F.readoutEl.textContent = '';
+  draw();
+}
+
+function exportFigure() {
+  if (!F.canvas) return;
+  const url = F.canvas.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${F.mode === 'bode' ? 'rzend_bode' : 'rzend_scope'}.png`;
+  a.click();
+}
+
+/* 导出数值数据为 CSV（时域：t 与各专业曲线；Bode：ω、幅频、相频） */
+function exportData() {
+  let csv = '';
+  if (F.mode === 'time' && F.series.length) {
+    const n = F.series[0].xs.length;
+    const headers = ['t'].concat(F.series.map((s) => s.name || 'y'));
+    csv += headers.join(',') + '\n';
+    for (let i = 0; i < n; i++) {
+      const row = [F.series[0].xs[i]];
+      for (const s of F.series) row.push(s.ys[i] ?? '');
+      csv += row.join(',') + '\n';
+    }
+  } else if (F.mode === 'bode' && F.bode) {
+    const B = F.bode;
+    const n = B.systems[0].w.length;
+    csv += 'w,mag_dB,phase_deg\n';
+    for (let i = 0; i < n; i++) {
+      csv += `${B.systems[0].w[i]},${B.systems[0].magDb[i]},${B.systems[0].phaseDeg[i]}\n`;
+    }
+  } else {
+    return;
+  }
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${F.mode === 'bode' ? 'rzend_bode' : 'rzend_scope'}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/* 自动辨识一阶系统：K≈末值（稳态），T≈0.632K 穿越时间（线性插值） */
+function identifyKT() {
+  if (F.mode !== 'time' || !F.series.length) return;
+  const s0 = F.series[0];
+  const n = s0.xs.length;
+  if (n < 2) return;
+  const K = s0.ys[n - 1];
+  let T = null;
+  for (let i = 1; i < n; i++) {
+    const prev = s0.ys[i - 1];
+    const cur = s0.ys[i];
+    if (cur === prev) continue;
+    if ((prev - 0.632 * K) * (cur - 0.632 * K) <= 0) {
+      const frac = (0.632 * K - prev) / (cur - prev);
+      T = s0.xs[i - 1] + frac * (s0.xs[i] - s0.xs[i - 1]);
+      break;
+    }
+  }
+  const tv = (x) => (x >= 1 ? `${x.toFixed(3)} s` : `${(x * 1e3).toFixed(2)} ms`);
+  const kv = (x) => (Math.abs(x) >= 1 ? x.toFixed(3) : `${(x * 1e3).toFixed(2)} m`);
+  const msg = `辨识：K ≈ ${kv(K)}　T ≈ ${T != null ? tv(T) : '—'}`;
+  if (F.subEl) F.subEl.textContent = msg;
+  if (F.readoutEl) F.readoutEl.textContent = msg;
 }
 
 export function closeFigure() {
@@ -189,6 +312,8 @@ function draw() {
   ctx.clearRect(0, 0, CW, CH);
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, CW, CH);
+
+  if (F.mode === 'bode') { drawBode(); return; }
 
   if (F.legend) {
     const named = F.series.map((s, i) => ({ s, i })).filter(({ s }) => s.name);
@@ -281,6 +406,174 @@ function draw() {
     ctx.stroke();
   });
   ctx.restore();
+
+  // 游标读数：鼠标在绘图区内时画十字虚线并提示 (t, 值)
+  if (F.mouse) {
+    const px = F.mouse.x, py = F.mouse.y;
+    const inside = px >= PAD.l && px <= PAD.l + pw && py >= PAD.t && py <= PAD.t + ph;
+    if (inside && F.view && F.series.length) {
+      const t = F.view.xmin + ((px - PAD.l) / pw) * (F.view.xmax - F.view.xmin);
+      const v = F.view.ymin + ((PAD.t + ph - py) / ph) * (F.view.ymax - F.view.ymin);
+      // 第一个系列在 t 处的最近采样值
+      let readY = null;
+      const s0 = F.series[0];
+      const m = Math.min(s0.xs.length, s0.ys.length);
+      let best = -1, bd = Infinity;
+      for (let i = 0; i < m; i++) {
+        const d = Math.abs(s0.xs[i] - t);
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best >= 0) readY = s0.ys[best];
+      ctx.save();
+      ctx.strokeStyle = 'rgba(0,114,189,0.55)';
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px + 0.5, PAD.t); ctx.lineTo(px + 0.5, PAD.t + ph);
+      ctx.moveTo(PAD.l, py + 0.5); ctx.lineTo(PAD.l + pw, py + 0.5);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#0072bd';
+      ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      if (F.readoutEl) {
+        const tv = t >= 1 ? `${t.toFixed(2)} s` : `${(t * 1e3).toFixed(1)} ms`;
+        F.readoutEl.textContent = readY == null
+          ? `t = ${tv}`
+          : `t = ${tv}  y = ${readY.toFixed(4)}`;
+      }
+    } else if (F.readoutEl) {
+      F.readoutEl.textContent = '';
+    }
+  }
+}
+
+function drawBode() {
+  const ctx = F.ctx;
+  if (!ctx || !F.bode) return;
+  const B = F.bode;
+
+  if (F.legend) {
+    F.legend.innerHTML = B.systems.map((s, i) => `<span class="scope-item">
+      <span class="scope-dot" style="background:${COLORS[i % COLORS.length]}"></span>${s.name}</span>`).join('');
+  }
+
+  const padL = 54, padR = 16, padT = 16, padB = 32, gap = 30;
+  const totalH = CH - padT - padB - gap;
+  const hMag = totalH * 0.62, hPh = totalH * 0.38;
+  const magTop = padT, magBot = padT + hMag;
+  const phTop = magBot + gap, phBot = phTop + hPh;
+  const pw = CW - padL - padR;
+  const xAt = (logw) => padL + ((logw - B.xmin) / (B.xmax - B.xmin)) * pw;
+  const yMag = (db) => magBot - ((db - B.magMin) / (B.magMax - B.magMin)) * hMag;
+  const yPh = (deg) => phBot - ((deg - B.phMin) / (B.phMax - B.phMin)) * hPh;
+
+  ctx.font = '10px Consolas, "Courier New", monospace';
+  ctx.fillStyle = '#5a6268';
+
+  // 竖向十倍频网格
+  ctx.strokeStyle = '#eef1f4'; ctx.lineWidth = 1;
+  for (let e = Math.ceil(B.xmin); e <= Math.floor(B.xmax); e++) {
+    const x = Math.round(xAt(e)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, phBot); ctx.stroke();
+  }
+  // 幅频水平网格
+  makeTicks(B.magMin, B.magMax, 5).forEach(({ v }) => {
+    const y = Math.round(yMag(v)) + 0.5;
+    ctx.strokeStyle = '#eef1f4';
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + pw, y); ctx.stroke();
+  });
+  // 相频 0° / ±180° 参考线
+  ctx.strokeStyle = '#d6dade';
+  [0, 180, -180].forEach((deg) => {
+    if (deg < B.phMin || deg > B.phMax) return;
+    const y = Math.round(yPh(deg)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + pw, y); ctx.stroke();
+  });
+
+  // 相频 45° 刻度
+  ctx.fillStyle = '#5a6268'; ctx.textAlign = 'right';
+  for (let deg = Math.ceil(B.phMin / 45) * 45; deg <= B.phMax; deg += 45) {
+    ctx.fillText(`${deg}°`, padL - 6, yPh(deg) + 3);
+  }
+  // 幅频刻度
+  makeTicks(B.magMin, B.magMax, 5).forEach(({ v, step }) => {
+    ctx.fillText(fmtNum(v, step), padL - 6, yMag(v) + 3);
+  });
+  // 十倍频横坐标
+  ctx.textAlign = 'center';
+  for (let e = Math.ceil(B.xmin); e <= Math.floor(B.xmax); e++) {
+    ctx.fillText(`10${sup(e)}`, xAt(e), phBot + 16);
+  }
+  // 面板标题
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#0072bd';
+  ctx.fillText('幅频 (dB)', padL + 4, magTop + 12);
+  ctx.fillText('相频 (°)', padL + 4, phTop + 12);
+
+  // 曲线
+  ctx.save();
+  ctx.beginPath(); ctx.rect(padL, padT, pw, phBot - padT); ctx.clip();
+  B.systems.forEach((s, si) => {
+    const color = COLORS[si % COLORS.length];
+    ctx.strokeStyle = color; ctx.lineWidth = 1.7; ctx.lineJoin = 'round';
+    ctx.beginPath(); let started = false;
+    for (let i = 0; i < s.w.length; i++) {
+      const x = xAt(Math.log10(s.w[i]));
+      const y = yMag(s.magDb[i]);
+      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath(); started = false;
+    for (let i = 0; i < s.w.length; i++) {
+      const x = xAt(Math.log10(s.w[i]));
+      const y = yPh(s.phaseDeg[i]);
+      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    }
+    ctx.stroke(); ctx.globalAlpha = 1;
+  });
+  ctx.restore();
+
+  // 轴框
+  ctx.strokeStyle = '#b9c0c7'; ctx.lineWidth = 1;
+  [[magTop, magBot], [phTop, phBot]].forEach(([t, b]) => {
+    ctx.beginPath();
+    ctx.moveTo(padL + 0.5, t); ctx.lineTo(padL + 0.5, b + 0.5);
+    ctx.lineTo(padL + pw, b + 0.5); ctx.stroke();
+  });
+
+  // 游标读数（取第一条曲线）
+  if (F.mouse) {
+    const px = F.mouse.x, py = F.mouse.y;
+    const inside = px >= padL && px <= padL + pw && py >= padT && py <= phBot;
+    if (inside) {
+      const logw = B.xmin + ((px - padL) / pw) * (B.xmax - B.xmin);
+      const w = 10 ** logw;
+      const s0 = B.systems[0];
+      let best = 0, bd = Infinity;
+      for (let i = 0; i < s0.w.length; i++) {
+        const d = Math.abs(Math.log10(s0.w[i]) - logw);
+        if (d < bd) { bd = d; best = i; }
+      }
+      const db = s0.magDb[best], ph = s0.phaseDeg[best];
+      ctx.save();
+      ctx.strokeStyle = 'rgba(0,114,189,0.5)'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(px + 0.5, padT); ctx.lineTo(px + 0.5, phBot); ctx.stroke();
+      ctx.setLineDash([]); ctx.restore();
+      if (F.readoutEl) {
+        const wv = w >= 1 ? `${w.toFixed(2)} rad/s` : `${(w * 1e3).toFixed(2)} mrad/s`;
+        F.readoutEl.textContent = `ω = ${wv}  |G| = ${db.toFixed(2)} dB  ∠ = ${ph.toFixed(1)}°`;
+      }
+    } else if (F.readoutEl) {
+      F.readoutEl.textContent = '';
+    }
+  }
+}
+
+function sup(n) {
+  const map = { '-': '⁻', '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹' };
+  return String(n).split('').map((c) => map[c] || c).join('');
 }
 
 function onWheel(e) {
