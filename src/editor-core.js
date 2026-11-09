@@ -59,7 +59,7 @@ function detectEol(text) {
 }
 
 const editorTheme = EditorView.theme({
-  '&': { backgroundColor: 'var(--bg)', color: 'var(--text)' },
+  '&': { backgroundColor: 'transparent', color: 'var(--text)' },
   '&.cm-focused': { outline: 'none' },
   '.cm-scroller': {
     fontFamily: 'var(--mono)',
@@ -68,22 +68,29 @@ const editorTheme = EditorView.theme({
   },
   '.cm-content': { padding: '10px 0', whiteSpace: 'pre' },
   '.cm-gutters': {
-    backgroundColor: 'var(--bg)',
-    borderRight: '1px solid var(--border-light)',
+    backgroundColor: 'rgba(255, 255, 255, 0.34)',
+    borderRight: '1px solid var(--glass-line)',
     color: '#9aa4b2',
+    backdropFilter: 'blur(8px)',
   },
   '.cm-lineNumbers .cm-gutterElement': { padding: '0 10px 0 6px' },
-  '.cm-activeLineGutter': { backgroundColor: 'var(--accent-bg)', color: 'var(--text-dim)' },
+  '.cm-activeLineGutter': { backgroundColor: 'rgba(11, 107, 203, 0.1)', color: 'var(--text-dim)' },
   '.cm-activeLine': { backgroundColor: 'var(--accent-bg)' },
   '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: '#cfe4fb !important' },
   '.cm-cursor': { borderLeftColor: 'var(--accent)' },
   '.cm-selectionMatch': { backgroundColor: '#d8ecff' },
   '.cm-searchMatch': { backgroundColor: '#fff1b8' },
-  '.cm-panels': { backgroundColor: 'var(--panel-bg)' },
+  '.cm-panels': {
+    backgroundColor: 'rgba(255, 255, 255, 0.86)',
+    backdropFilter: 'blur(18px) saturate(160%)',
+  },
   '.cm-tooltip': {
-    border: '1px solid var(--border)',
-    borderRadius: '6px',
-    boxShadow: 'var(--shadow-md)',
+    border: '1px solid var(--glass-border)',
+    borderRadius: '8px',
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    backdropFilter: 'blur(20px) saturate(170%)',
+    boxShadow:
+      'inset 0 1px 0 rgba(255, 255, 255, 0.95), 0 16px 40px -12px rgba(15, 23, 42, 0.28)',
   },
   '.cm-tooltip-autocomplete': { overflow: 'hidden' },
   '.cm-tooltip-autocomplete > ul': {
