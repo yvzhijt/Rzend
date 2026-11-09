@@ -1,6 +1,7 @@
 // 服务层：跨模块共享的副作用操作，集中在此以消除循环依赖。
 // 所有模块只需 import services，不互相 import。
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { state, $, $$, print, esc } from './common.js';
 
 /* ---------------- 终端同步回调（由 terminal.js 注入） ---------------- */
@@ -27,9 +28,17 @@ export function updateStatus() {
 
 /* ---------------- 文件树刷新 ---------------- */
 
+// 目录内容指纹：名称 + 类型，用于自动刷新时判断是否真的发生了变化
+function entriesSignature(entries) {
+  return entries.map((e) => `${e.is_dir ? 'd' : 'f'}:${e.name}`).join('\n');
+}
+
+let treeSignature = '';
+
 export async function refreshTree() {
   try {
     state.entries = await invoke('shell_ls');
+    treeSignature = entriesSignature(state.entries);
     state.treeError = '';
     state.treeErrors.clear();
   } catch (e) {
@@ -44,6 +53,7 @@ export async function refreshTree() {
 }
 
 export function renderTree() {
+  syncTreeWatchers();
   const tree = $('#file-tree');
   if (!tree) return;
   tree.innerHTML = '';
@@ -82,7 +92,14 @@ function renderNode(container, entry, depth) {
   row.addEventListener('click', () => {
     if (entry.is_dir) {
       if (state.expanded.has(entry.path)) {
-        state.expanded.delete(entry.path);
+        // 收起时连同后代一起移出展开集合，避免继续监听已隐藏的子目录
+        const prefix = `${entry.path}\\`;
+        const prefixAlt = `${entry.path}/`;
+        for (const path of state.expanded) {
+          if (path === entry.path || path.startsWith(prefix) || path.startsWith(prefixAlt)) {
+            state.expanded.delete(path);
+          }
+        }
       } else {
         state.treeErrors.delete(entry.path);
         state.expanded.add(entry.path);
@@ -129,6 +146,7 @@ async function loadTreeDirectory(entry) {
     const currentEntry = findTreeEntry(state.entries, entry.path);
     if (currentEntry) {
       currentEntry.children = children;
+      currentEntry.childrenSignature = entriesSignature(children);
       state.treeErrors.delete(entry.path);
     }
   } catch (e) {
@@ -158,6 +176,158 @@ function fileIcon(name) {
 export function bindFileTree() {
   $('#btn-refresh')?.addEventListener('click', refreshTree);
   $('#btn-folder-up')?.addEventListener('click', () => doCd('..'));
+}
+
+/* ---------------- 文件树自动刷新 ---------------- */
+
+// 优先使用后端原生文件监听（事件驱动，空闲时零开销）；
+// 如果运行的是未重新编译的旧后端，则自动退回低频轮询。
+let autoRefreshTimer = 0;
+let autoRefreshBusy = false;
+let autoRefreshBound = false;
+let fsChangeTimer = 0;
+let fsChangeUnlisten = null;
+let watcherSupported = null; // null = 未知，true / false = 是否可用
+let watcherPathsKey = '';
+let watcherSyncBusy = false;
+let watcherSyncPending = false;
+
+function desiredWatchPaths() {
+  return [state.cwd, ...state.expanded].filter(Boolean);
+}
+
+/** 把需要监听的目录列表同步给后端（cwd + 已展开的目录） */
+async function syncTreeWatchers(force = false) {
+  if (watcherSupported === false) return;
+  const paths = desiredWatchPaths();
+  const key = paths.join('\n');
+  if (!force && key === watcherPathsKey) return;
+  if (watcherSyncBusy) {
+    watcherSyncPending = true;
+    return;
+  }
+
+  watcherSyncBusy = true;
+  try {
+    await invoke('watch_tree', { paths });
+    watcherSupported = true;
+    watcherPathsKey = key;
+  } catch {
+    // 旧后端没有 watch_tree 命令：停止尝试，改用轮询兜底
+    watcherSupported = false;
+  } finally {
+    watcherSyncBusy = false;
+    if (watcherSyncPending) {
+      watcherSyncPending = false;
+      syncTreeWatchers(true);
+    }
+  }
+}
+
+// 只重新扫描已展开的子目录，内容有变化才重绘，避免无谓闪烁
+async function refreshExpandedDirs() {
+  let changed = false;
+  for (const path of Array.from(state.expanded)) {
+    const entry = findTreeEntry(state.entries, path);
+    if (!entry) continue;
+    try {
+      const children = await invoke('scan_directory', { path });
+      const sig = entriesSignature(children);
+      if (!entry.children || entry.childrenSignature !== sig) {
+        entry.children = children;
+        entry.childrenSignature = sig;
+        changed = true;
+      }
+      state.treeErrors.delete(path);
+    } catch {
+      // 子目录可能刚被删除，留给下一轮刷新处理
+    }
+  }
+  return changed;
+}
+
+/** 静默检查目录变化，有变化时才重绘文件树 */
+export async function autoRefreshTree() {
+  if (autoRefreshBusy || document.hidden) return;
+  autoRefreshBusy = true;
+  try {
+    const entries = await invoke('shell_ls');
+    const sig = entriesSignature(entries);
+
+    if (sig !== treeSignature) {
+      state.entries = entries;
+      treeSignature = sig;
+      state.treeError = '';
+      state.treeErrors.clear();
+      renderTree();
+      updateStatus();
+      return;
+    }
+
+    // 上次读取失败但现在已经恢复：清掉错误提示
+    if (state.treeError) {
+      state.treeError = '';
+      state.treeErrors.clear();
+      renderTree();
+    }
+
+    if (await refreshExpandedDirs()) renderTree();
+  } catch {
+    // 自动刷新保持静默，避免失败时刷屏
+  } finally {
+    autoRefreshBusy = false;
+  }
+}
+
+/** 原生监听回调的节流：一次批量文件操作只刷新一次 */
+function scheduleTreeRefresh() {
+  if (fsChangeTimer) return;
+  fsChangeTimer = window.setTimeout(() => {
+    fsChangeTimer = 0;
+    autoRefreshTree();
+  }, 90);
+}
+
+async function bindTreeFileEvents() {
+  if (fsChangeUnlisten) return;
+  try {
+    fsChangeUnlisten = await listen('fs-change', scheduleTreeRefresh);
+  } catch {
+    // 旧后端没有该事件，轮询兜底即可
+  }
+}
+
+/** 启动文件树自动刷新：原生监听 + 焦点刷新，监听不可用时退回轮询 */
+export async function startTreeAutoRefresh() {
+  stopTreeAutoRefresh();
+  watcherSupported = null;
+  watcherPathsKey = '';
+  await syncTreeWatchers(true);
+
+  // 原生监听可用时只保留 30 秒低频兜底（网络盘 / 漏事件）；
+  // 不可用时才用 3 秒轮询。
+  const fallbackMs = watcherSupported ? 30000 : 3000;
+  autoRefreshTimer = window.setInterval(autoRefreshTree, fallbackMs);
+
+  bindTreeFileEvents();
+
+  if (autoRefreshBound) return;
+  autoRefreshBound = true;
+  window.addEventListener('focus', autoRefreshTree);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) autoRefreshTree();
+  });
+}
+
+export function stopTreeAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = 0;
+  }
+  if (fsChangeTimer) {
+    clearTimeout(fsChangeTimer);
+    fsChangeTimer = 0;
+  }
 }
 
 /* ---------------- 目录切换 ---------------- */

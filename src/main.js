@@ -5,7 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { state, $, $$, print } from './common.js';
 import { MAIN_DOCKS, bindPanelDrag, restorePanelOrder } from './panels.js';
 import {
-  bindFileTree, openFolderDialog, refreshTree, updateStatus,
+  bindFileTree, openFolderDialog, refreshTree, updateStatus, startTreeAutoRefresh,
   doCd, bindTerminalSync, bindTerminalOps, bindFocusInput, bindWorkspaceOps,
   hasUnsavedChanges,
 } from './services.js';
@@ -336,6 +336,7 @@ async function init() {
   state.cwd = await invoke('get_initial_dir').catch(() => '.');
   setTerminalCwdChip(state.cwd);
   await refreshTree();
+  startTreeAutoRefresh();
   updateStatus();
   focusInput();
 }

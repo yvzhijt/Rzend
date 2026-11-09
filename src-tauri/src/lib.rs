@@ -28,6 +28,7 @@ pub struct AppState {
     pub circuit_pending: Arc<Mutex<Option<String>>>,
     pub signal_pending: Arc<Mutex<Option<String>>>,
     pub terminal: commands::terminal::TerminalSlot,
+    pub tree_watch: commands::watch::TreeWatchSlot,
 }
 
 impl AppState {
@@ -40,6 +41,7 @@ impl AppState {
             circuit_pending: Arc::new(Mutex::new(None)),
             signal_pending: Arc::new(Mutex::new(None)),
             terminal: commands::terminal::new_slot(),
+            tree_watch: commands::watch::new_slot(),
         }
     }
 }
@@ -83,6 +85,7 @@ pub fn run() {
             commands::terminal::pty_resize,
             commands::terminal::pty_sync_cwd,
             commands::terminal::pty_kill,
+            commands::watch::watch_tree,
         ])
         .setup(|app| {
             // 窗口可能尚未就绪，取不到不算致命错误

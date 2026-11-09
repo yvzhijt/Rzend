@@ -4,6 +4,7 @@
 //   windows  文件对话框与仿真窗口开关
 //   shell    shell 命令（pwd/cd/ls/mkdir/rm/spawn）
 //   yt_cmds  .yt 脚本求值相关命令
+//   watch    文件树原生监听（事件驱动，代替轮询）
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -14,6 +15,7 @@ pub(crate) mod windows;
 pub(crate) mod shell;
 pub(crate) mod yt_cmds;
 pub(crate) mod terminal;
+pub(crate) mod watch;
 
 /// 锁毒化恢复：panic 已被 catch_unwind 捕获时，锁内数据仍然可用
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

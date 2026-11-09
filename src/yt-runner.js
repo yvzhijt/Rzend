@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { state, $, print, esc } from './common.js';
 import { showFigure } from './figure.js';
-import { renderTree, openFile, saveFile, toggleTerminal, injectLine, focusInput, hasUnsavedChanges } from './services.js';
+import { refreshTree, openFile, saveFile, toggleTerminal, injectLine, focusInput, hasUnsavedChanges } from './services.js';
 
 /* ================ 工作区渲染 ================ */
 
@@ -74,7 +74,7 @@ function validateNewFileName(raw) {
 export async function createFileFromCommand(rawName) {
   const name = validateNewFileName(rawName);
   const path = await invoke('create_file', { name });
-  await renderTree();
+  await refreshTree();
   await openFile(path);
   print(`已新建: ${name}\n`, 'cmd-info');
 }
